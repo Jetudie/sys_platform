@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="可直接開啟的單檔容器內容物視覺化工具">
+  <title>容器視圖 Lite</title>
+  <style>
+    :root{
+      --ink:#17233d;--blue:#213b72;--paper:#f4f2ec;--line:#d8d5cd;
+      --coral:#f46c4e;--gold:#f2b84b;--mint:#5ab6a9;--sky:#5e86e5;
+      --purple:#a879d8;--pink:#e781a6
+    }
+    *{box-sizing:border-box}
+    html{font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;color:var(--ink);background:var(--paper)}
+    body{margin:0;min-width:320px;background:var(--paper)}
+    button,input{font:inherit}
+    button{cursor:pointer}
+    .top{min-height:70px;display:flex;align-items:center;gap:12px;padding:12px clamp(16px,3vw,42px);background:#fffffff0;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+    .logo{width:40px;height:40px;display:grid;place-items:center;border-radius:12px;background:var(--blue);color:#fff;font-size:21px;box-shadow:inset 0 -4px #0002}
+    .brand small,.kicker{display:block;color:#df5d43;font:800 11px/1.2 Consolas,monospace;letter-spacing:.12em}
+    h1,h2,h3,p{margin:0}
+    h1{font-size:20px;letter-spacing:-.04em}
+    .stats{margin-left:auto;display:flex;gap:24px;color:#687187;font-size:13px}
+    .stats b{color:var(--ink);font:800 16px Consolas,monospace;margin-right:4px}
+    .layout{display:grid;grid-template-columns:minmax(330px,390px) minmax(0,1fr);min-height:calc(100vh - 70px)}
+    .control{padding:25px clamp(16px,2.5vw,30px) 45px;background:#ffffffb5;border-right:1px solid var(--line)}
+    .result{padding:25px clamp(18px,4vw,54px) 55px;color:#fff;background-color:var(--ink);background-image:radial-gradient(#fff1 1px,transparent 1px);background-size:20px 20px}
+    .section-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:20px}
+    .section-head h2{font-size:24px;letter-spacing:-.045em}
+    .result .kicker{color:var(--gold)}
+    .muted-btn,.add-btn{border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:#fff;color:#46516a;font-size:13px;font-weight:700}
+    .add-btn{border:0;color:#3158a6;padding:5px;background:transparent}
+    .main-count{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;margin-bottom:16px;border:1px solid var(--line);border-radius:13px;background:#fff;box-shadow:0 3px #e0ddd5}
+    .main-count label{font-weight:800;font-size:14px}.main-count p{color:#858a96;font-size:12px;margin-top:2px}
+    input[type=number]{width:60px;text-align:center}
+    .input{width:100%;height:34px;border:1px solid #cfccc4;border-radius:8px;padding:5px 9px;background:#fbfaf7;color:var(--ink);font-weight:700;outline:none}
+    .input:focus{border-color:var(--sky);box-shadow:0 0 0 3px #5e86e528}
+    .edit-list{display:grid;gap:13px}
+    .edit-card{overflow:hidden;border:1px solid var(--line);border-radius:16px;background:#fff;box-shadow:0 5px 16px #222b430c}
+    .big-row{display:grid;grid-template-columns:36px 1fr;gap:11px;padding:14px;border-bottom:1px solid #ebe8e1}
+    .index{display:grid;place-items:center;border-radius:9px;background:var(--blue);color:#fff;font:800 12px Consolas,monospace}
+    .label{display:block;color:#777d89;font-size:12px;font-weight:700;margin-bottom:4px}
+    .type-title{display:flex;align-items:center;justify-content:space-between;padding:8px 11px 5px 15px;color:#727989;font-size:12px;font-weight:700}
+    .types{padding:0 11px 11px}
+    .type{display:grid;grid-template-columns:5px 1fr;gap:9px;padding:10px 3px 10px 5px;border-top:1px solid #efede8}
+    .swatch{border-radius:99px;background:var(--c)}
+    .type-top{display:grid;grid-template-columns:1fr 30px;gap:4px}
+    .trash{border:0;border-radius:7px;background:transparent;color:#999;font-size:17px}.trash:hover{background:#fff1ef;color:#c84439}
+    .count-row{margin-top:8px}
+    .count-row label{font-size:11px;color:#777d89;font-weight:700}
+    .count-row .input{margin-top:4px;font-family:Consolas,monospace}
+    .instance-block{margin-top:10px;padding-top:9px;border-top:1px dashed #ddd9d0}
+    .instance-title{display:block;margin-bottom:6px;color:#5d6575;font-size:11px;font-weight:800}
+    .instance-counts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+    .instance-counts label{display:flex;align-items:center;gap:4px;padding:4px 5px;border:1px solid #e2dfd7;border-radius:7px;background:#f7f6f2;color:#6f7685;font:700 10px Consolas,monospace}
+    .instance-counts .input{min-width:0;height:28px;padding:2px 4px;margin:0;border:0;background:#fff}
+    .empty-add{width:100%;padding:15px;border:1px dashed #bbb8b1;border-radius:9px;background:#faf9f6;color:#667086}
+    .canvas{display:grid;gap:22px}
+    .crate{position:relative;padding:16px 16px 23px;border:1px solid #3c4c6d;border-radius:20px 20px 25px 25px;background:linear-gradient(150deg,#263657,#1b2a48);box-shadow:0 14px 28px #060c1b48}
+    .crate:after{content:"";position:absolute;left:28px;right:28px;bottom:-7px;height:8px;border-radius:0 0 9px 9px;background:#0f192d}
+    .crate-head{display:flex;align-items:center;gap:10px;margin-bottom:15px}
+    .crate-icon{width:38px;height:38px;display:grid;place-items:center;border:1px solid #536488;border-radius:10px;color:var(--gold);font-size:20px}
+    .crate-head small{display:block;color:#90a0c0;font:11px Consolas,monospace;letter-spacing:.06em}
+    .crate-head h3{font-size:17px}.crate-total{margin-left:auto;padding:5px 8px;border:1px solid #455676;border-radius:99px;color:#c5cee0;font-size:11px}
+    .small-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:11px}
+    .small{position:relative;padding:9px;border:1px solid color-mix(in srgb,var(--c) 50%,#334360);border-top:4px solid var(--c);border-radius:10px 10px 13px 13px;background:#f9fafc;color:var(--ink);box-shadow:0 6px #101b31}
+    .small:before{content:"";position:absolute;width:35px;height:5px;left:50%;top:-4px;translate:-50% -100%;border-radius:5px 5px 0 0;background:var(--c)}
+    .small-head{display:flex;justify-content:space-between;gap:6px;padding-bottom:7px;font-size:12px;font-weight:800}
+    .small-head span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.small-head b{color:var(--c);font:800 11px Consolas,monospace}
+    .well{min-height:58px;display:flex;align-items:flex-end;justify-content:center;padding:7px;border:1px solid #e0e4ec;border-radius:7px;background:repeating-linear-gradient(0deg,#eef1f6 0,#eef1f6 1px,#f7f8fb 1px,#f7f8fb 9px);box-shadow:inset 0 2px 5px #17233d14}
+    .dots{display:flex;flex-wrap:wrap-reverse;justify-content:center;gap:4px}.dot{width:11px;height:11px;border-radius:50%;background:var(--c);box-shadow:inset -2px -2px #0002,inset 2px 2px #fff5}
+    .qty{display:block;margin-top:5px;color:#737b8a;text-align:right;font:10px Consolas,monospace}
+    .empty{min-height:90px;display:grid;place-items:center;border:1px dashed #455676;border-radius:12px;color:#8795b2;font-size:13px}
+    .saved{color:#aab4c9;font-size:12px}.saved:before{content:"●";color:var(--mint);margin-right:6px}
+    @media(max-width:850px){.layout{grid-template-columns:1fr}.control{border-right:0;border-bottom:1px solid var(--line)}.edit-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:620px){.top{position:static;flex-wrap:wrap}.stats{order:3;width:100%;justify-content:space-between;margin:4px 0 0;gap:8px}.edit-list{grid-template-columns:1fr}.section-head{align-items:flex-start}.small-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.crate-total{display:none}}
+  </style>
+</head>
+<body>
+  <header class="top">
+    <div class="logo" aria-hidden="true">▣</div>
+    <div class="brand"><small>CONTAINER MAP</small><h1>容器視圖 Lite</h1></div>
+    <div class="stats" id="stats" aria-live="polite"></div>
+  </header>
+  <main class="layout">
+    <aside class="control" aria-label="容器設定">
+      <div class="section-head">
+        <div><span class="kicker">設定</span><h2>安排你的容器</h2></div>
+        <button class="muted-btn" data-action="reset">↻ 載入範例</button>
+      </div>
+      <div class="main-count">
+        <div><label for="bigCount">大容器數量</label><p>最多 8 個</p></div>
+        <input class="input" id="bigCount" type="number" min="1" max="8">
+      </div>
+      <div class="edit-list" id="editList"></div>
+    </aside>
+    <section class="result" aria-label="容器即時圖像">
+      <div class="section-head">
+        <div><span class="kicker">即時預覽</span><h2>一眼看懂裝了什麼</h2></div>
+        <span class="saved">自動儲存於這台電腦</span>
+      </div>
+      <div class="canvas" id="canvas"></div>
+    </section>
+  </main>
+  <script>
+    (() => {
+      'use strict';
+      const KEY='container-map-lite-v1';
+      const COLORS=['#f46c4e','#f2b84b','#5ab6a9','#5e86e5','#a879d8','#e781a6'];
+      const SAMPLE=[
+        {name:'水果籃 A',types:[{name:'蘋果盒',quantity:3,items:[6,5,7]},{name:'橘子袋',quantity:2,items:[4,6]}]},
+        {name:'水果籃 B',types:[{name:'梨子盒',quantity:2,items:[5,4]},{name:'莓果杯',quantity:4,items:[3,4,2,5]}]}
+      ];
+      const clone=value=>JSON.parse(JSON.stringify(value));
+      const esc=value=>String(value).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+      const clamp=(value,min,max)=>Math.min(max,Math.max(min,Number.isFinite(value)?value:min));
+      let state=load();
+
+      function normalize(data){
+        return data.slice(0,8).map((big,bi)=>({
+          name:String(big.name||`大容器 ${bi+1}`),
+          types:(Array.isArray(big.types)?big.types:[]).slice(0,8).map(type=>{
+            const quantity=clamp(Number(type.quantity),1,12);
+            const fallback=clamp(Number(type.itemCount),0,30);
+            const items=(Array.isArray(type.items)?type.items:[]).slice(0,quantity).map(value=>clamp(Number(value),0,30));
+            while(items.length<quantity) items.push(Number.isFinite(fallback)?fallback:0);
+            return {name:String(type.name||'小容器'),quantity,items};
+          })
+        }));
+      }
+      function load(){
+        try{
+          const saved=JSON.parse(localStorage.getItem(KEY));
+          if(Array.isArray(saved)&&saved.length) return normalize(saved);
+        }catch(_error){}
+        return clone(SAMPLE);
+      }
+      function save(){try{localStorage.setItem(KEY,JSON.stringify(state))}catch(_error){}}
+      function totals(){
+        let small=0,items=0;
+        state.forEach(big=>big.types.forEach(type=>{small+=type.quantity;items+=type.items.reduce((sum,value)=>sum+value,0)}));
+        return {small,items};
+      }
+      function renderStats(){
+        const t=totals();
+        document.querySelector('#stats').innerHTML=`<span><b>${state.length}</b>大容器</span><span><b>${t.small}</b>小容器</span><span><b>${t.items}</b>內容物</span>`;
+      }
+      function renderEditors(){
+        document.querySelector('#bigCount').value=state.length;
+        document.querySelector('#editList').innerHTML=state.map((big,bi)=>`
+          <section class="edit-card">
+            <div class="big-row"><span class="index">${String(bi+1).padStart(2,'0')}</span><label><span class="label">大容器名稱</span><input class="input" data-action="big-name" data-bi="${bi}" value="${esc(big.name)}"></label></div>
+            <div class="type-title"><span>${big.types.length} 種小容器</span><button class="add-btn" data-action="add-type" data-bi="${bi}">＋ 新增種類</button></div>
+            <div class="types">${big.types.length?big.types.map((type,ti)=>`
+              <div class="type" style="--c:${COLORS[ti%COLORS.length]}"><span class="swatch"></span><div>
+                <div class="type-top"><input class="input" aria-label="小容器名稱" data-action="type-name" data-bi="${bi}" data-ti="${ti}" value="${esc(type.name)}"><button class="trash" aria-label="刪除 ${esc(type.name)}" data-action="delete-type" data-bi="${bi}" data-ti="${ti}">×</button></div>
+                <div class="count-row"><label>小容器數量<input class="input" type="number" min="1" max="12" data-action="quantity" data-bi="${bi}" data-ti="${ti}" value="${type.quantity}"></label></div>
+                <div class="instance-block"><span class="instance-title">各小容器內容物</span><div class="instance-counts">${type.items.map((value,ii)=>`<label><span>${String(ii+1).padStart(2,'0')}</span><input class="input" aria-label="${esc(type.name)} ${ii+1} 內容物數量" type="number" min="0" max="30" data-action="item" data-bi="${bi}" data-ti="${ti}" data-ii="${ii}" value="${value}"></label>`).join('')}</div></div>
+              </div></div>`).join(''):`<button class="empty-add" data-action="add-type" data-bi="${bi}">＋ 加入第一種小容器</button>`}</div>
+          </section>`).join('');
+      }
+      function renderCanvas(){
+        document.querySelector('#canvas').innerHTML=state.map((big,bi)=>{
+          const count=big.types.reduce((sum,type)=>sum+type.quantity,0);
+          const smalls=[];
+          big.types.forEach((type,ti)=>{
+            for(let i=0;i<type.quantity;i++){
+              const color=COLORS[ti%COLORS.length];
+              const itemCount=type.items[i]||0;
+              const dots=itemCount?`<div class="dots">${'<i class="dot"></i>'.repeat(itemCount)}</div>`:'<span style="color:#9299a7;font-size:11px">空</span>';
+              smalls.push(`<section class="small" style="--c:${color}"><div class="small-head"><span>${esc(type.name)||'未命名'}</span><b>${String(i+1).padStart(2,'0')}</b></div><div class="well">${dots}</div><span class="qty">${itemCount} 個</span></section>`);
+            }
+          });
+          return `<article class="crate"><div class="crate-head"><div class="crate-icon">□</div><div><small>大容器 ${String(bi+1).padStart(2,'0')}</small><h3>${esc(big.name)||'未命名容器'}</h3></div><span class="crate-total">${count} 個小容器</span></div>${smalls.length?`<div class="small-grid">${smalls.join('')}</div>`:'<div class="empty">這個大容器目前是空的</div>'}</article>`;
+        }).join('');
+      }
+      function renderAll(){renderStats();renderEditors();renderCanvas();save()}
+      function updatePreview(){renderStats();renderCanvas();save()}
+
+      document.addEventListener('input',event=>{
+        const el=event.target,action=el.dataset.action;
+        if(action==='big-name'){state[+el.dataset.bi].name=el.value;updatePreview()}
+        if(action==='type-name'){state[+el.dataset.bi].types[+el.dataset.ti].name=el.value;updatePreview()}
+      });
+      document.addEventListener('change',event=>{
+        const el=event.target,action=el.dataset.action;
+        if(el.id==='bigCount'){
+          const next=clamp(+el.value,1,8);
+          while(state.length<next) state.push({name:`大容器 ${state.length+1}`,types:[{name:'小容器',quantity:1,items:[3]}]});
+          state=state.slice(0,next);renderAll();return;
+        }
+        if(action==='quantity'){
+          const type=state[+el.dataset.bi].types[+el.dataset.ti],next=clamp(+el.value,1,12);
+          while(type.items.length<next) type.items.push(0);
+          type.items=type.items.slice(0,next);type.quantity=next;renderAll();
+        }
+        if(action==='item'){state[+el.dataset.bi].types[+el.dataset.ti].items[+el.dataset.ii]=clamp(+el.value,0,30);renderAll()}
+      });
+      document.addEventListener('click',event=>{
+        const button=event.target.closest('button');if(!button)return;
+        const action=button.dataset.action,bi=+button.dataset.bi,ti=+button.dataset.ti;
+        if(action==='reset'){state=clone(SAMPLE);renderAll()}
+        if(action==='add-type'){state[bi].types.push({name:`小容器種類 ${state[bi].types.length+1}`,quantity:1,items:[3]});renderAll()}
+        if(action==='delete-type'){state[bi].types.splice(ti,1);renderAll()}
+      });
+      renderAll();
+    })();
+  </script>
+</body>
+</html>
