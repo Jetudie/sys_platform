@@ -1,9 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArrowDown, Check, CheckCircle2, ChevronRight, CircleDot, Clock3, Code2, Download, FileJson, FileText, Layers3, MessageCircle, Plus, Search, Server, Sparkles, Trash2 } from 'lucide-react';
+import { Archive, ArrowDown, Check, CheckCircle2, ChevronRight, CircleDot, Clock3, Code2, Download, FileJson, FileText, GitBranch, Layers3, MessageCircle, Plus, Search, Server, Settings2, Sparkles, Trash2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -75,6 +76,7 @@ const findModulePath = (modules: SystemModule[], id: string, path: SystemModule[
   return [];
 };
 const updateModuleTree = (modules: SystemModule[], id: string, patch: Partial<SystemModule>): SystemModule[] => modules.map((module) => module.id === id ? { ...module, ...patch } : { ...module, children: updateModuleTree(module.children ?? [], id, patch) });
+const removeModuleTree = (modules: SystemModule[], id: string): SystemModule[] => modules.filter((module) => module.id !== id).map((module) => ({ ...module, children: removeModuleTree(module.children ?? [], id) }));
 const moduleMatches = (module: SystemModule, query: string, filter: 'all' | TopicStatus): boolean => {
   const text = `${module.name} ${module.code} ${module.summary} ${module.spaces.map((space) => `${space.name} ${space.kind}`).join(' ')} ${module.topics.map((topic) => `${topic.title} ${topic.content}`).join(' ')}`.toLowerCase();
   const ownMatch = (!query || text.includes(query)) && (filter === 'all' || module.topics.some((topic) => topic.status === filter));
@@ -143,6 +145,8 @@ export default function Home() {
   }, [data, revision]);
 
   const mutate = (updater: (current: SystemMapData) => SystemMapData) => { localChangeRef.current = true; setData(updater); };
+  const updateSystemName = (systemName: string) => mutate((current) => ({ ...current, systemName }));
+  const updateVersion = (patch: Partial<SystemVersion>) => mutate((current) => ({ ...current, versions: current.versions.map((item) => item.id === version.id ? { ...item, ...patch } : item) }));
   const updateModule = (patch: Partial<SystemModule>) => mutate((current) => ({ ...current, versions: current.versions.map((item) => item.id === version.id ? { ...item, modules: updateModuleTree(item.modules, selectedModule.id, patch) } : item) }));
   const updateTopic = (topicId: string, patch: Partial<Topic>) => updateModule({ topics: selectedModule.topics.map((topic) => topic.id === topicId ? { ...topic, ...patch, updatedAt: nowLabel() } : topic) });
   const addTopic = () => { const topic: Topic = { id: makeId('topic'), title: '未命名主題', content: '在這裡補上背景、決定或待確認事項。', status: 'draft', updatedAt: nowLabel() }; updateModule({ topics: [...selectedModule.topics, topic] }); setSelectedTopicId(topic.id); };
@@ -154,8 +158,44 @@ export default function Home() {
     updateModule({ children: [...(selectedModule.children ?? []), child] });
     setSelectedModuleId(child.id); setSelectedTopicId(null);
   };
+  const addPeerModule = () => {
+    const parent = selectedPath.at(-2);
+    const peer: SystemModule = { id: makeId('module'), name: '新同層模組', code: `${selectedModule.code}-PEER`, summary: '補上這個模組的責任範圍。', health: 'healthy', color: selectedModule.color, spaces: [], topics: [], children: [] };
+    mutate((current) => ({
+      ...current,
+      versions: current.versions.map((item) => {
+        if (item.id !== version.id) return item;
+        if (!parent) return { ...item, modules: [...item.modules, peer] };
+        const currentParent = findModule(item.modules, parent.id);
+        return currentParent ? { ...item, modules: updateModuleTree(item.modules, parent.id, { children: [...(currentParent.children ?? []), peer] }) } : item;
+      }),
+    }));
+    setSelectedModuleId(peer.id); setSelectedTopicId(null);
+  };
+  const moveModule = (nextParentId: string) => {
+    const currentParentId = selectedPath.at(-2)?.id ?? 'root';
+    if (nextParentId === currentParentId) return;
+    mutate((current) => ({
+      ...current,
+      versions: current.versions.map((item) => {
+        if (item.id !== version.id) return item;
+        const moving = findModule(item.modules, selectedModule.id);
+        if (!moving) return item;
+        const withoutMoving = removeModuleTree(item.modules, moving.id);
+        if (nextParentId === 'root') return { ...item, modules: [...withoutMoving, moving] };
+        const nextParent = findModule(withoutMoving, nextParentId);
+        if (!nextParent) return item;
+        return { ...item, modules: updateModuleTree(withoutMoving, nextParent.id, { children: [...(nextParent.children ?? []), moving] }) };
+      }),
+    }));
+  };
   const chooseVersion = (id: string) => { const next = data.versions.find((item) => item.id === id); if (!next) return; setVersionId(id); setSelectedModuleId(next.modules[0]?.id ?? ''); setSelectedTopicId(next.modules[0]?.topics[0]?.id ?? null); };
   const allModules = useMemo(() => flattenModules(version.modules), [version]);
+  const parentOptions = useMemo(() => {
+    const invalidIds = new Set([selectedModule.id, ...flattenModules(selectedModule.children ?? []).map((item) => item.id)]);
+    return allModules.filter((item) => !invalidIds.has(item.id)).map((item) => ({ id: item.id, label: findModulePath(version.modules, item.id).map((part) => part.name).join(' / ') }));
+  }, [allModules, selectedModule, version.modules]);
+  const currentParentId = selectedPath.at(-2)?.id ?? 'root';
   const visibleModules = useMemo(() => version.modules.filter((module) => moduleMatches(module, query.trim().toLowerCase(), topicFilter)), [query, topicFilter, version]);
   const topicCounts = useMemo(() => allModules.flatMap((module) => module.topics).reduce((counts, topic) => ({ ...counts, [topic.status]: counts[topic.status] + 1 }), { draft: 0, discussion: 0, reviewed: 0 } as Record<TopicStatus, number>), [allModules]);
 
@@ -170,7 +210,18 @@ export default function Home() {
 
   return <main className="system-shell">
     <header className="topbar"><div className="brand-block"><div className="brand-symbol" aria-hidden="true"><Layers3 /></div><div><p className="eyebrow">SYSTEM MAP</p><h1>{data.systemName}</h1></div></div><div className="topbar-actions"><span className={`sync-state ${syncState}`}><i />{syncLabel}</span><DropdownMenu><DropdownMenuTrigger render={<Button variant="outline" className="export-button" />}><Download />匯出文件</DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => exportVersion('md')}><FileText />Markdown (.md)</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('html')}><Code2 />HTML (.html)</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('json')}><FileJson />JSON 資料</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></header>
-    <section className="version-strip" aria-label="系統版本"><div className="version-selector"><span className="field-label">系統版本</span><Select value={version.id} onValueChange={(value) => value && chooseVersion(value)}><SelectTrigger aria-label="選擇系統版本"><SelectValue /></SelectTrigger><SelectContent>{data.versions.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.state}</SelectItem>)}</SelectContent></Select></div><div className="version-note"><Badge variant="outline">{version.release}</Badge><span>{version.description}</span></div><div className="version-metrics" aria-label="版本摘要"><span><strong>{allModules.length}</strong> 模組</span><span><strong>{allModules.reduce((sum, module) => sum + module.spaces.length, 0)}</strong> 暫存區</span><span><strong>{topicCounts.discussion}</strong> 討論中</span></div></section>
+    <section className="version-strip" aria-label="系統版本">
+      <div className="version-selector"><span className="field-label">系統版本</span><Select value={version.id} onValueChange={(value) => value && chooseVersion(value)}><SelectTrigger aria-label="選擇系統版本"><SelectValue /></SelectTrigger><SelectContent>{data.versions.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.state}</SelectItem>)}</SelectContent></Select>
+        <Dialog><DialogTrigger render={<Button type="button" variant="outline" size="sm" className="version-edit-button" />}><Settings2 />編輯</DialogTrigger><DialogContent className="version-edit-dialog"><DialogHeader><DialogTitle>編輯系統與版本</DialogTitle><DialogDescription>這些名稱與說明會同步顯示在地圖及匯出文件。</DialogDescription></DialogHeader><div className="version-form">
+          <label htmlFor="system-name"><span>系統名稱</span><Input id="system-name" value={data.systemName} onChange={(event) => updateSystemName(event.target.value)} /></label>
+          <label htmlFor={`version-label-${version.id}`}><span>版本名稱</span><Input id={`version-label-${version.id}`} value={version.label} onChange={(event) => updateVersion({ label: event.target.value })} /></label>
+          <label htmlFor={`version-release-${version.id}`}><span>發布時間</span><Input id={`version-release-${version.id}`} value={version.release} onChange={(event) => updateVersion({ release: event.target.value })} /></label>
+          <label><span>版本狀態</span><Select value={version.state} onValueChange={(value) => value && updateVersion({ state: value as SystemVersion['state'] })}><SelectTrigger aria-label="版本狀態"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="現行">現行</SelectItem><SelectItem value="候選">候選</SelectItem><SelectItem value="封存">封存</SelectItem></SelectContent></Select></label>
+          <label className="version-description-field" htmlFor={`version-description-${version.id}`}><span>版本說明</span><Textarea id={`version-description-${version.id}`} value={version.description} onChange={(event) => updateVersion({ description: event.target.value })} /></label>
+        </div></DialogContent></Dialog>
+      </div>
+      <div className="version-note"><Badge variant="outline">{version.release}</Badge><span>{version.description}</span></div><div className="version-metrics" aria-label="版本摘要"><span><strong>{allModules.length}</strong> 模組</span><span><strong>{allModules.reduce((sum, module) => sum + module.spaces.length, 0)}</strong> 暫存區</span><span><strong>{topicCounts.discussion}</strong> 討論中</span></div>
+    </section>
     <div className="workspace">
       <section className="map-panel" aria-label="系統模組視覺化"><div className="map-toolbar"><div className="search-box"><Search aria-hidden="true" /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜尋模組、暫存區或主題…" aria-label="搜尋系統資訊" /></div><div className="filter-set" aria-label="主題狀態篩選">{(['all', 'discussion', 'draft', 'reviewed'] as const).map((filter) => <button key={filter} type="button" className={topicFilter === filter ? 'active' : ''} onClick={() => setTopicFilter(filter)}>{filter === 'all' ? '全部' : topicMeta[filter].label}{filter !== 'all' ? <b>{topicCounts[filter]}</b> : null}</button>)}</div></div>
         <div className="system-canvas"><div className="canvas-header"><div><span className="canvas-kicker">ARCHITECTURE / {version.label}</span><h2>服務與暫存責任</h2></div><span className="canvas-hint"><CircleDot />點擊模組開啟文件</span></div><div className="request-source"><Server /><span>Client / Partner APIs</span></div><ArrowDown className="flow-arrow top-flow" aria-hidden="true" />
@@ -179,14 +230,30 @@ export default function Home() {
         <footer className="attention-bar"><div><Sparkles /><span><strong>溝通焦點</strong> 先處理 {topicCounts.discussion} 則討論，再確認 {topicCounts.draft} 則草稿。</span></div><button type="button" onClick={() => setTopicFilter('discussion')}>只看討論中 <ChevronRight /></button></footer></section>
       {selectedModule ? <aside className="detail-panel" aria-label={`${selectedModule.name} 詳細資訊`}>
         <div className="module-breadcrumb" aria-label="模組層級">{selectedPath.map((item, index) => <span key={item.id}>{index ? <ChevronRight /> : null}<button type="button" onClick={() => { setSelectedModuleId(item.id); setSelectedTopicId(item.topics[0]?.id ?? null); }}>{item.name}</button></span>)}</div>
-        <div className="detail-head" style={{ '--module-color': selectedModule.color } as React.CSSProperties}><span className="detail-code">{selectedModule.code} · 第 {selectedPath.length} 層</span><span className={`health-mark ${healthMeta[selectedModule.health].tone}`}>{healthMeta[selectedModule.health].label}</span><h2>{selectedModule.name}</h2><Textarea aria-label="模組說明" value={selectedModule.summary} onChange={(event) => updateModule({ summary: event.target.value })} /></div>
+        <div className="detail-head" style={{ '--module-color': selectedModule.color } as React.CSSProperties}>
+          <div className="detail-level"><span className="detail-code">第 {selectedPath.length} 層</span><span className={`health-mark ${healthMeta[selectedModule.health].tone}`}>{healthMeta[selectedModule.health].label}</span></div>
+          <label className="detail-field" htmlFor={`module-name-${selectedModule.id}`}><span>模組名稱</span><Input id={`module-name-${selectedModule.id}`} className="module-name-input" value={selectedModule.name} onChange={(event) => updateModule({ name: event.target.value })} /></label>
+          <div className="detail-compact-fields">
+            <label className="detail-field" htmlFor={`module-code-${selectedModule.id}`}><span>模組代碼</span><Input id={`module-code-${selectedModule.id}`} value={selectedModule.code} onChange={(event) => updateModule({ code: event.target.value })} /></label>
+            <label className="detail-field"><span>健康狀態</span><Select value={selectedModule.health} onValueChange={(value) => value && updateModule({ health: value as ModuleHealth })}><SelectTrigger aria-label="模組健康狀態"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="healthy">穩定</SelectItem><SelectItem value="watch">留意</SelectItem><SelectItem value="risk">風險</SelectItem></SelectContent></Select></label>
+            <label className="detail-field color-field" htmlFor={`module-color-${selectedModule.id}`}><span>識別色</span><input id={`module-color-${selectedModule.id}`} type="color" value={selectedModule.color} onChange={(event) => updateModule({ color: event.target.value })} /></label>
+          </div>
+          <label className="detail-field" htmlFor={`module-summary-${selectedModule.id}`}><span>責任與說明</span><Textarea id={`module-summary-${selectedModule.id}`} value={selectedModule.summary} onChange={(event) => updateModule({ summary: event.target.value })} /></label>
+        </div>
         <Tabs defaultValue="topics" className="detail-tabs">
-          <TabsList><TabsTrigger value="topics">主題 <b>{selectedModule.topics.length}</b></TabsTrigger><TabsTrigger value="spaces">暫存空間 <b>{selectedModule.spaces.length}</b></TabsTrigger><TabsTrigger value="children">子模組 <b>{(selectedModule.children ?? []).length}</b></TabsTrigger></TabsList>
+          <TabsList><TabsTrigger value="topics">主題 <b>{selectedModule.topics.length}</b></TabsTrigger><TabsTrigger value="spaces">暫存空間 <b>{selectedModule.spaces.length}</b></TabsTrigger><TabsTrigger value="children">結構 <b>{(selectedModule.children ?? []).length}</b></TabsTrigger></TabsList>
           <TabsContent value="topics" className="tab-body"><div className="tab-actions"><p>決議、疑問與背景都放在這裡。</p><Button size="sm" onClick={addTopic}><Plus />新增主題</Button></div><div className="topic-list">{selectedModule.topics.map((topic) => { const Icon = topicMeta[topic.status].icon; return <button type="button" key={topic.id} className={`topic-row ${selectedTopicId === topic.id ? 'active' : ''}`} onClick={() => setSelectedTopicId(topic.id)}><Icon /><span><strong>{topic.title}</strong><small>{topic.updatedAt}</small></span><Badge className={topic.status}>{topicMeta[topic.status].label}</Badge></button>; })}{!selectedModule.topics.length ? <div className="detail-empty"><MessageCircle /><span>還沒有主題</span><button type="button" onClick={addTopic}>建立第一則</button></div> : null}</div>
             {selectedTopic ? <div className="topic-editor"><div className="editor-heading"><span>編輯內容</span><Select value={selectedTopic.status} onValueChange={(value) => value && updateTopic(selectedTopic.id, { status: value as TopicStatus })}><SelectTrigger aria-label="主題狀態"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="draft">草稿</SelectItem><SelectItem value="discussion">討論中</SelectItem><SelectItem value="reviewed">已 Review</SelectItem></SelectContent></Select></div><label><span>主題</span><Input value={selectedTopic.title} onChange={(event) => updateTopic(selectedTopic.id, { title: event.target.value })} /></label><label><span>內容</span><Textarea value={selectedTopic.content} onChange={(event) => updateTopic(selectedTopic.id, { content: event.target.value })} /></label><p className="autosave-note"><Check />自動同步變更，不鎖定編輯者</p></div> : null}
           </TabsContent>
           <TabsContent value="spaces" className="tab-body"><div className="tab-actions"><p>每個小容器代表這一層模組擁有的暫存責任。</p><Button size="sm" onClick={addSpace}><Plus />新增暫存區</Button></div><div className="space-list editable">{selectedModule.spaces.map((space, index) => <article key={space.id}><span className="space-no">{String(index + 1).padStart(2, '0')}</span><Archive /><div className="space-fields"><label><span>名稱</span><Input value={space.name} onChange={(event) => updateSpace(space.id, { name: event.target.value })} /></label><label><span>類型</span><Input value={space.kind} onChange={(event) => updateSpace(space.id, { kind: event.target.value })} /></label><label className="space-detail-field"><span>容量、TTL 或用途</span><Input value={space.detail} onChange={(event) => updateSpace(space.id, { detail: event.target.value })} /></label></div><Button type="button" variant="ghost" size="icon-sm" className="space-delete" aria-label={`刪除 ${space.name}`} onClick={() => removeSpace(space.id)}><Trash2 /></Button></article>)}{!selectedModule.spaces.length ? <div className="detail-empty"><Archive /><span>這個模組尚無暫存空間</span><button type="button" onClick={addSpace}>加入第一個</button></div> : null}</div><p className="autosave-note"><Check />變更會同步到畫布與匯出文件</p></TabsContent>
-          <TabsContent value="children" className="tab-body"><div className="tab-actions"><p>任何子模組都能繼續加入下一層。</p><Button size="sm" onClick={addChildModule}><Plus />新增子模組</Button></div><div className="module-settings"><label><span>模組名稱</span><Input value={selectedModule.name} onChange={(event) => updateModule({ name: event.target.value })} /></label><label><span>模組代碼</span><Input value={selectedModule.code} onChange={(event) => updateModule({ code: event.target.value })} /></label><label><span>健康狀態</span><Select value={selectedModule.health} onValueChange={(value) => value && updateModule({ health: value as ModuleHealth })}><SelectTrigger aria-label="模組健康狀態"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="healthy">穩定</SelectItem><SelectItem value="watch">留意</SelectItem><SelectItem value="risk">風險</SelectItem></SelectContent></Select></label></div><div className="child-list">{(selectedModule.children ?? []).map((child) => <button type="button" key={child.id} onClick={() => { setSelectedModuleId(child.id); setSelectedTopicId(child.topics[0]?.id ?? null); }}><Layers3 /><span><strong>{child.name}</strong><small>{child.code} · {(child.children ?? []).length} 子模組</small></span><ChevronRight /></button>)}{!(selectedModule.children ?? []).length ? <div className="detail-empty"><Layers3 /><span>這一層尚無子模組</span><button type="button" onClick={addChildModule}>加入第一個</button></div> : null}</div></TabsContent>
+          <TabsContent value="children" className="tab-body">
+            <div className="structure-intro"><GitBranch /><div><strong>指定模組層級</strong><p>可將目前模組移到另一個模組下方，或升為根層；會自動排除自己與子孫，避免循環。</p></div></div>
+            <div className="module-settings">
+              <label><span>上層模組</span><Select value={currentParentId} onValueChange={(value) => value && moveModule(value)}><SelectTrigger aria-label="選擇上層模組"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="root">根層（無上層）</SelectItem>{parentOptions.map((item) => <SelectItem key={item.id} value={item.id}>{item.label}</SelectItem>)}</SelectContent></Select></label>
+              <div className="structure-actions"><Button type="button" variant="outline" size="sm" onClick={addPeerModule}><Plus />新增同層模組</Button><Button type="button" size="sm" onClick={addChildModule}><Plus />新增子模組</Button></div>
+            </div>
+            <div className="child-list">{(selectedModule.children ?? []).map((child) => <button type="button" key={child.id} onClick={() => { setSelectedModuleId(child.id); setSelectedTopicId(child.topics[0]?.id ?? null); }}><Layers3 /><span><strong>{child.name}</strong><small>{child.code} · {(child.children ?? []).length} 子模組</small></span><ChevronRight /></button>)}{!(selectedModule.children ?? []).length ? <div className="detail-empty"><Layers3 /><span>這一層尚無子模組</span><button type="button" onClick={addChildModule}>加入第一個</button></div> : null}</div>
+          </TabsContent>
         </Tabs>
       </aside> : null}
     </div>
