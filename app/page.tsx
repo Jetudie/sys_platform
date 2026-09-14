@@ -89,6 +89,7 @@ const expandedSpaceNames = (space: TempSpace) => {
 };
 const instanceCount = (space: TempSpace, index: number) => Math.max(0, Math.floor(Number(space.instanceCounts?.[index] ?? 0)) || 0);
 const moduleSpaceCount = (module: SystemModule) => module.spaces.reduce((sum, space) => sum + spaceQuantity(space), 0);
+const ownRecordCount = (module: SystemModule) => module.spaces.reduce((total, space) => total + expandedSpaceNames(space).reduce((sum, _, index) => sum + instanceCount(space, index), 0), 0);
 const moduleRecordCount = (module: SystemModule): number => module.spaces.reduce((sum, space) => sum + expandedSpaceNames(space).reduce((spaceSum, _, index) => spaceSum + instanceCount(space, index), 0), 0) + (module.children ?? []).reduce((sum, child) => sum + moduleRecordCount(child), 0);
 const moduleMatches = (module: SystemModule, query: string, filter: 'all' | ModuleHealth): boolean => {
   const text = `${module.name} ${module.code} ${module.summary} ${module.spaces.map((space) => `${expandedSpaceNames(space).join(' ')} ${space.kind}`).join(' ')} ${module.topics.map((topic) => `${topic.title} ${topic.content}`).join(' ')}`.toLowerCase();
@@ -97,22 +98,63 @@ const moduleMatches = (module: SystemModule, query: string, filter: 'all' | Modu
 };
 
 function downloadFile(name: string, content: string, type: string) {
-  const blob = new Blob([content], { type }); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url);
+  const blob = new Blob([content], { type }); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.hidden = true; document.body.appendChild(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
-function moduleMarkdown(module: SystemModule, depth = 2): string {
+const safeFileName = (value: string) => value.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').replace(/[.\s]+$/g, '').slice(0, 120) || 'system-map';
+const modulePathLabel = (modules: SystemModule[], id: string) => findModulePath(modules, id).map((part) => part.name).join(' / ');
+const versionSummary = (version: SystemVersion) => {
+  const modules = flattenModules(version.modules);
+  return {
+    rootModuleCount: version.modules.length,
+    moduleCount: modules.length,
+    spaceCount: modules.reduce((sum, module) => sum + moduleSpaceCount(module), 0),
+    recordCount: version.modules.reduce((sum, module) => sum + moduleRecordCount(module), 0),
+    topicCount: modules.reduce((sum, module) => sum + module.topics.length, 0),
+    flowCount: (version.flows ?? []).length,
+    health: modules.reduce((counts, module) => ({ ...counts, [module.health]: counts[module.health] + 1 }), { healthy: 0, watch: 0, risk: 0 } as Record<ModuleHealth, number>),
+  };
+};
+function moduleMarkdown(module: SystemModule, path: string[] = [], depth = 2): string {
   const heading = '#'.repeat(Math.min(depth, 6));
-  const childSection = (module.children ?? []).map((child) => moduleMarkdown(child, depth + 1)).join('\n\n');
-  return `${heading} ${module.name} (${module.code})\n\n${module.summary}\n\n**狀態：** ${healthMeta[module.health].label}\n\n${heading}# 暫存空間\n\n${module.spaces.length ? module.spaces.flatMap((space) => expandedSpaceNames(space).map((name, index) => `- **${name}** · ${space.kind} · ${instanceCount(space, index)} 筆 — ${space.detail}`)).join('\n') : '- 無'}\n\n${heading}# 主題與決議\n\n${module.topics.length ? module.topics.map((topic) => `- **${topic.title}** · ${topicMeta[topic.status].label} · ${topic.updatedAt}\n  ${topic.content}`).join('\n') : '- 目前沒有主題。'}${childSection ? `\n\n${heading}# 子模組\n\n${childSection}` : ''}`;
+  const sectionHeading = '#'.repeat(Math.min(depth + 1, 6));
+  const nextPath = [...path, module.name];
+  const childSection = (module.children ?? []).map((child) => moduleMarkdown(child, nextPath, depth + 1)).join('\n\n');
+  const spaces = module.spaces.length ? module.spaces.map((space) => {
+    const names = expandedSpaceNames(space); const total = names.reduce((sum, _, index) => sum + instanceCount(space, index), 0);
+    return `- **${space.name}** · ${space.kind} · ${names.length} 個實例 · 共 ${total} 筆 — ${space.detail}\n${names.map((name, index) => `  - ${name}：${instanceCount(space, index)} 筆`).join('\n')}`;
+  }).join('\n') : '- 無';
+  return `${heading} ${module.name} (${module.code})\n\n${module.summary}\n\n- **層級：** ${nextPath.join(' / ')}\n- **狀態：** ${healthMeta[module.health].label}\n- **資料筆數：** 本模組 ${ownRecordCount(module)} 筆；含子模組 ${moduleRecordCount(module)} 筆\n- **暫存實例：** ${moduleSpaceCount(module)} 個\n- **主題：** ${module.topics.length} 項\n\n${sectionHeading} 暫存空間\n\n${spaces}\n\n${sectionHeading} 主題與決議\n\n${module.topics.length ? module.topics.map((topic) => `- **${topic.title}** · ${topicMeta[topic.status].label} · ${topic.updatedAt}\n  ${topic.content}`).join('\n') : '- 目前沒有主題。'}${childSection ? `\n\n${sectionHeading} 子模組\n\n${childSection}` : ''}`;
 }
-function versionMarkdown(version: SystemVersion, systemName: string) {
-  const flows = (version.flows ?? []).map((flow) => `- **${findModule(version.modules, flow.sourceId)?.name ?? flow.sourceId}** → **${findModule(version.modules, flow.targetId)?.name ?? flow.targetId}**${flow.label ? ` · ${flow.label}` : ''}`).join('\n') || '- 尚未設定資料流。';
-  return `# ${systemName} — ${version.label}\n\n> ${version.release} · ${version.state}\n\n${version.description}\n\n## 模組資料流\n\n${flows}\n\n${version.modules.map((module) => moduleMarkdown(module)).join('\n\n---\n\n')}\n`;
+function versionMarkdown(version: SystemVersion, systemName: string, exportedAt: string) {
+  const summary = versionSummary(version);
+  const flows = (version.flows ?? []).map((flow) => {
+    const source = findModule(version.modules, flow.sourceId); const target = findModule(version.modules, flow.targetId);
+    return `- **${source ? modulePathLabel(version.modules, source.id) : flow.sourceId}**${source ? ` (${source.code}，${moduleRecordCount(source)} 筆)` : ''} → **${target ? modulePathLabel(version.modules, target.id) : flow.targetId}**${target ? ` (${target.code}，${moduleRecordCount(target)} 筆)` : ''}${flow.label ? ` · ${flow.label}` : ''}`;
+  }).join('\n') || '- 尚未設定資料流。';
+  return `# ${systemName} — ${version.label}\n\n> ${version.release} · ${version.state}\n\n${version.description}\n\n- **匯出時間：** ${exportedAt}\n- **模組：** ${summary.moduleCount} 個（${summary.rootModuleCount} 個根模組）\n- **暫存實例：** ${summary.spaceCount} 個\n- **資料筆數：** ${summary.recordCount} 筆\n- **資料流：** ${summary.flowCount} 條\n- **主題：** ${summary.topicCount} 項\n- **健康狀態：** 穩定 ${summary.health.healthy}、留意 ${summary.health.watch}、風險 ${summary.health.risk}\n\n## 模組資料流\n\n${flows}\n\n## 模組明細\n\n${version.modules.map((module) => moduleMarkdown(module)).join('\n\n---\n\n')}\n`;
 }
-function versionHtml(version: SystemVersion, systemName: string) {
+function versionHtml(version: SystemVersion, systemName: string, exportedAt: string) {
   const escape = (value: string) => value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] ?? char);
-  const renderModule = (module: SystemModule, depth = 0): string => `<article style="margin-left:${depth * 22}px"><h2>${escape(module.name)} <small>${escape(module.code)}</small></h2><p>${escape(module.summary)}</p><h3>暫存空間</h3><ul>${module.spaces.flatMap((space) => expandedSpaceNames(space).map((name, index) => `<li><b>${escape(name)}</b> · ${escape(space.kind)} · ${instanceCount(space, index)} 筆 — ${escape(space.detail)}</li>`)).join('') || '<li>無</li>'}</ul><h3>主題與決議</h3>${module.topics.map((topic) => `<section><h4>${escape(topic.title)}</h4><span class="tag">${escape(topicMeta[topic.status].label)}</span><p>${escape(topic.content)}</p><small>${escape(topic.updatedAt)}</small></section>`).join('') || '<p>目前沒有主題。</p>'}${(module.children ?? []).map((child) => renderModule(child, depth + 1)).join('')}</article>`;
-  const flows = (version.flows ?? []).map((flow) => `<li><b>${escape(findModule(version.modules, flow.sourceId)?.name ?? flow.sourceId)}</b> → <b>${escape(findModule(version.modules, flow.targetId)?.name ?? flow.targetId)}</b>${flow.label ? ` · ${escape(flow.label)}` : ''}</li>`).join('') || '<li>尚未設定資料流。</li>';
-  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escape(systemName)} ${escape(version.label)}</title><style>body{max-width:880px;margin:48px auto;padding:0 24px;font:16px/1.7 system-ui;color:#172035}h1,h2,h3{line-height:1.25}article{border-top:1px solid #d8dde8;padding:24px 0}.tag{display:inline-block;padding:2px 8px;background:#eef2f7;border-radius:4px;font-size:13px}</style></head><body><h1>${escape(systemName)} — ${escape(version.label)}</h1><p>${escape(version.release)} · ${escape(version.state)}</p><p>${escape(version.description)}</p><h2>模組資料流</h2><ul>${flows}</ul>${version.modules.map((module) => renderModule(module)).join('')}</body></html>`;
+  const summary = versionSummary(version);
+  const renderModule = (module: SystemModule, path: string[] = [], depth = 0): string => {
+    const nextPath = [...path, module.name];
+    const spaceRows = module.spaces.flatMap((space) => expandedSpaceNames(space).map((name, index) => `<tr><td>${escape(space.name)}</td><td>${escape(name)}</td><td>${escape(space.kind)}</td><td>${instanceCount(space, index)}</td><td>${escape(space.detail)}</td></tr>`)).join('') || '<tr><td colspan="5">無</td></tr>';
+    const topics = module.topics.map((topic) => `<section class="topic"><div><strong>${escape(topic.title)}</strong><span class="tag">${escape(topicMeta[topic.status].label)}</span></div><p>${escape(topic.content)}</p><small>${escape(topic.updatedAt)}</small></section>`).join('') || '<p>目前沒有主題。</p>';
+    return `<article style="margin-left:${Math.min(depth, 3) * 18}px"><h2>${escape(module.name)} <small>${escape(module.code)}</small></h2><p class="path">${escape(nextPath.join(' / '))}</p><p>${escape(module.summary)}</p><dl><div><dt>狀態</dt><dd>${escape(healthMeta[module.health].label)}</dd></div><div><dt>本模組資料</dt><dd>${ownRecordCount(module)} 筆</dd></div><div><dt>含子模組</dt><dd>${moduleRecordCount(module)} 筆</dd></div><div><dt>暫存實例</dt><dd>${moduleSpaceCount(module)} 個</dd></div><div><dt>主題</dt><dd>${module.topics.length} 項</dd></div></dl><h3>暫存空間</h3><div class="table-wrap"><table><thead><tr><th>基礎名稱</th><th>實例</th><th>類型</th><th>資料筆數</th><th>容量、TTL 或用途</th></tr></thead><tbody>${spaceRows}</tbody></table></div><h3>主題與決議</h3>${topics}${(module.children ?? []).map((child) => renderModule(child, nextPath, depth + 1)).join('')}</article>`;
+  };
+  const flowRows = (version.flows ?? []).map((flow) => {
+    const source = findModule(version.modules, flow.sourceId); const target = findModule(version.modules, flow.targetId);
+    return `<tr><td>${escape(source ? modulePathLabel(version.modules, source.id) : flow.sourceId)}${source ? `<small>${escape(source.code)}</small>` : ''}</td><td>${escape(target ? modulePathLabel(version.modules, target.id) : flow.targetId)}${target ? `<small>${escape(target.code)}</small>` : ''}</td><td>${escape(flow.label || '—')}</td><td>${source ? moduleRecordCount(source) : '—'} → ${target ? moduleRecordCount(target) : '—'} 筆</td></tr>`;
+  }).join('') || '<tr><td colspan="4">尚未設定資料流。</td></tr>';
+  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escape(systemName)} ${escape(version.label)}</title><style>:root{color-scheme:light}*{box-sizing:border-box}body{max-width:1040px;margin:48px auto;padding:0 24px 64px;font:16px/1.65 system-ui;color:#172035;background:#f7f9fc}header,article{background:#fff;border:1px solid #d8dde8;border-radius:14px;padding:24px;margin:0 0 20px}h1,h2,h3{line-height:1.25}h1{margin:0 0 8px}h2 small,.path,small{display:block;color:#68748a;font-weight:500}.summary,dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:10px}.summary div,dl div{background:#f1f4f8;border-radius:8px;padding:10px 12px}.summary strong,dd{display:block;font-size:1.15rem;margin:0}dt{color:#68748a;font-size:.82rem}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:9px 10px;border-bottom:1px solid #e2e6ee;text-align:left;vertical-align:top}th{font-size:.78rem;color:#5c687d;background:#f4f6f9}.topic{border-left:3px solid #6f9cff;padding:8px 12px;margin:10px 0}.topic p{margin:5px 0}.tag{display:inline-block;margin-left:8px;padding:2px 8px;background:#e8eefc;border-radius:999px;font-size:13px}@media(max-width:640px){body{margin:20px auto;padding:0 12px 40px}header,article{padding:18px}article{margin-left:0!important}}</style></head><body><header><h1>${escape(systemName)} — ${escape(version.label)}</h1><p>${escape(version.release)} · ${escape(version.state)}</p><p>${escape(version.description)}</p><small>匯出時間：${escape(exportedAt)}</small><div class="summary"><div><span>模組</span><strong>${summary.moduleCount}</strong></div><div><span>暫存實例</span><strong>${summary.spaceCount}</strong></div><div><span>資料筆數</span><strong>${summary.recordCount}</strong></div><div><span>資料流</span><strong>${summary.flowCount}</strong></div><div><span>主題</span><strong>${summary.topicCount}</strong></div><div><span>健康狀態</span><strong>${summary.health.healthy} / ${summary.health.watch} / ${summary.health.risk}</strong><small>穩定 / 留意 / 風險</small></div></div></header><article><h2>模組資料流</h2><div class="table-wrap"><table><thead><tr><th>來源模組</th><th>目標模組</th><th>資料流名稱</th><th>節點資料筆數</th></tr></thead><tbody>${flowRows}</tbody></table></div></article><h1>模組明細</h1>${version.modules.map((module) => renderModule(module)).join('')}</body></html>`;
+}
+
+function fullSystemJson(data: SystemMapData, exportedAt: string) {
+  const enrichModule = (module: SystemModule, path: string[]): object => {
+    const nextPath = [...path, module.name];
+    return { ...module, path: nextPath, healthLabel: healthMeta[module.health].label, ownRecordCount: ownRecordCount(module), totalRecordCount: moduleRecordCount(module), spaceInstanceCount: moduleSpaceCount(module), spaces: module.spaces.map((space) => { const names = expandedSpaceNames(space); return { ...space, quantity: names.length, totalRecordCount: names.reduce((sum, _, index) => sum + instanceCount(space, index), 0), instances: names.map((name, index) => ({ name, recordCount: instanceCount(space, index) })) }; }), topics: module.topics.map((topic) => ({ ...topic, statusLabel: topicMeta[topic.status].label })), children: (module.children ?? []).map((child) => enrichModule(child, nextPath)) };
+  };
+  return JSON.stringify({ schemaVersion: 'system-map-export/v1', exportedAt, systemName: data.systemName, versionCount: data.versions.length, versions: data.versions.map((version) => ({ ...version, summary: versionSummary(version), flows: (version.flows ?? []).map((flow) => ({ ...flow, source: { id: flow.sourceId, path: modulePathLabel(version.modules, flow.sourceId) || flow.sourceId }, target: { id: flow.targetId, path: modulePathLabel(version.modules, flow.targetId) || flow.targetId } })), modules: version.modules.map((module) => enrichModule(module, [])) })) }, null, 2);
 }
 
 function CacheVessel({ name, count, compact = false }: { name: string; count: number; compact?: boolean }) {
@@ -122,8 +164,6 @@ function CacheVessel({ name, count, compact = false }: { name: string; count: nu
     <span className="vessel-cup" aria-hidden="true"><span className="vessel-balls">{Array.from({ length: visibleBalls }, (_, index) => <i key={index} />)}</span>{count > visibleBalls ? <em>+{count - visibleBalls}</em> : null}</span>
   </span>;
 }
-
-const ownRecordCount = (module: SystemModule) => module.spaces.reduce((total, space) => total + expandedSpaceNames(space).reduce((sum, _, index) => sum + instanceCount(space, index), 0), 0);
 
 function buildFlowLevels(modules: SystemModule[], flows: DataFlow[]) {
   const flat = flattenModules(modules); const ids = new Set(flat.map((module) => module.id));
@@ -303,11 +343,11 @@ export default function Home() {
     void Promise.resolve(registration).catch(() => undefined); return () => lifecycle.abort();
   }, [data.versions]);
 
-  const exportVersion = (format: 'md' | 'html' | 'json') => { const base = `${data.systemName}-${version.label}`.replace(/\s+/g, '-'); if (format === 'md') downloadFile(`${base}.md`, versionMarkdown(version, data.systemName), 'text/markdown;charset=utf-8'); if (format === 'html') downloadFile(`${base}.html`, versionHtml(version, data.systemName), 'text/html;charset=utf-8'); if (format === 'json') downloadFile(`${base}.json`, JSON.stringify(version, null, 2), 'application/json;charset=utf-8'); };
+  const exportVersion = (format: 'md' | 'html' | 'json') => { const exportedAt = new Date().toISOString(); const versionBase = safeFileName(`${data.systemName}-${version.label}`); if (format === 'md') downloadFile(`${versionBase}.md`, versionMarkdown(version, data.systemName, exportedAt), 'text/markdown;charset=utf-8'); if (format === 'html') downloadFile(`${versionBase}.html`, versionHtml(version, data.systemName, exportedAt), 'text/html;charset=utf-8'); if (format === 'json') downloadFile(`${safeFileName(data.systemName)}-完整系統.json`, fullSystemJson(data, exportedAt), 'application/json;charset=utf-8'); };
   const syncLabel = syncState === 'saving' ? '儲存中…' : syncState === 'saved' ? '共同編輯 · 已同步' : syncState === 'conflict' ? '已載入其他人的更新' : syncState === 'loading' ? '連線中…' : '本機預覽模式';
 
   return <main className="system-shell">
-    <header className="topbar"><div className="brand-block"><div className="brand-symbol" aria-hidden="true"><Layers3 /></div><div><p className="eyebrow">SYSTEM MAP</p><h1>{data.systemName}</h1></div></div><div className="topbar-actions"><span className={`sync-state ${syncState}`}><i />{syncLabel}</span><DropdownMenu><DropdownMenuTrigger render={<Button variant="outline" className="export-button" />}><Download />匯出文件</DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => exportVersion('md')}><FileText />Markdown (.md)</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('html')}><Code2 />HTML (.html)</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('json')}><FileJson />JSON 資料</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></header>
+    <header className="topbar"><div className="brand-block"><div className="brand-symbol" aria-hidden="true"><Layers3 /></div><div><p className="eyebrow">SYSTEM MAP</p><h1>{data.systemName}</h1></div></div><div className="topbar-actions"><span className={`sync-state ${syncState}`}><i />{syncLabel}</span><DropdownMenu><DropdownMenuTrigger render={<Button variant="outline" className="export-button" />}><Download />匯出文件</DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => exportVersion('md')}><FileText />目前版本 Markdown</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('html')}><Code2 />目前版本 HTML</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('json')}><FileJson />完整系統 JSON 備份</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></header>
     <section className="version-strip" aria-label="系統版本">
       <div className="version-selector"><span className="field-label">系統版本</span><Select value={version.id} onValueChange={(value) => value && chooseVersion(value)}><SelectTrigger aria-label="選擇系統版本"><SelectValue>{version.label} · {version.state}</SelectValue></SelectTrigger><SelectContent align="start" alignItemWithTrigger={false} sideOffset={8}>{data.versions.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.state}</SelectItem>)}</SelectContent></Select><Button type="button" variant="outline" size="sm" className="version-add-button" onClick={addVersion}><Plus />新增</Button>
         <Dialog><DialogTrigger render={<Button type="button" variant="outline" size="sm" className="version-edit-button" />}><Settings2 />編輯</DialogTrigger><DialogContent className="version-edit-dialog"><DialogHeader><DialogTitle>編輯系統與版本</DialogTitle><DialogDescription>這些名稱與說明會同步顯示在地圖及匯出文件。</DialogDescription></DialogHeader><div className="version-form">
