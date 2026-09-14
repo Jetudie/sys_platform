@@ -84,7 +84,17 @@ const findModulePath = (modules: SystemModule[], id: string, path: SystemModule[
   }
   return [];
 };
-const updateModuleTree = (modules: SystemModule[], id: string, patch: Partial<SystemModule>): SystemModule[] => modules.map((module) => module.id === id ? { ...module, ...patch } : { ...module, children: updateModuleTree(module.children ?? [], id, patch) });
+const updateModuleTree = (modules: SystemModule[], id: string, patch: Partial<SystemModule>): SystemModule[] => {
+  let changed = false;
+  const nextModules = modules.map((module) => {
+    if (module.id === id) { changed = true; return { ...module, ...patch }; }
+    const children = module.children ?? [];
+    const nextChildren = updateModuleTree(children, id, patch);
+    if (nextChildren === children) return module;
+    changed = true; return { ...module, children: nextChildren };
+  });
+  return changed ? nextModules : modules;
+};
 const removeModuleTree = (modules: SystemModule[], id: string): SystemModule[] => modules.filter((module) => module.id !== id).map((module) => ({ ...module, children: removeModuleTree(module.children ?? [], id) }));
 const spaceQuantity = (space: TempSpace) => Math.max(1, Math.floor(Number(space.quantity ?? 1)) || 1);
 const expandedSpaceNames = (space: TempSpace) => {
@@ -128,9 +138,10 @@ function versionHtml(version: SystemVersion, systemName: string) {
 
 function CacheVessel({ name, count, compact = false, showZero = false }: { name: string; count: number; compact?: boolean; showZero?: boolean }) {
   const visibleBalls = Math.min(count, compact ? 6 : 12);
+  const fillLevel = `${Math.min(92, 26 + visibleBalls * 5.5)}%`;
   return <span className={`cache-vessel ${count ? 'occupied' : 'empty'} ${compact ? 'compact' : ''}`} aria-label={`${name}，${count} 筆資料`}>
     <span className="vessel-label"><b>{name}</b><small>{count ? count + ' 筆' : showZero ? '0 筆' : '空'}</small></span>
-    <span className="vessel-cup" aria-hidden="true"><span className="vessel-balls">{Array.from({ length: visibleBalls }, (_, index) => <i key={index} />)}</span>{count > visibleBalls ? <em>+{count - visibleBalls}</em> : null}</span>
+    <span className="vessel-cup" aria-hidden="true"><span className="vessel-balls">{count ? <i style={{ '--fill-level': fillLevel } as React.CSSProperties} /> : null}</span>{count > visibleBalls ? <em>+{count - visibleBalls}</em> : null}</span>
   </span>;
 }
 
@@ -224,7 +235,7 @@ function FullSystemFlow({ modules, flows, selectedId, visibleIds, onSelect }: { 
         const nextFlowCount = flows.filter((flow) => stage.entries.some((entry) => entry.module.id === flow.sourceId) && visibleIds.has(flow.targetId) && (stage.rankById.get(flow.targetId) ?? stage.rank) > stage.rank).length;
         return <div className="system-flow-stage-wrap" key={stage.rank}>
           <section className="system-flow-stage" aria-label={stageName}>
-            <div className="system-flow-stage-label"><span>第 {stage.rank + 1} 層</span><strong>{stageName}</strong><b>{stage.entries.length} 個模組</b></div>
+            <div className="system-flow-stage-label"><span>STAGE {stage.rank + 1}</span><strong>{stageName}</strong><b>{stage.entries.length} 個模組</b></div>
             <div className="system-flow-node-grid">{stage.entries.map((entry) => <SystemFlowNode key={entry.module.id} entry={entry} modules={modules} flows={flows} selectedId={selectedId} onSelect={onSelect} />)}</div>
           </section>
           {stageIndex < stages.length - 1 ? <div className="system-flow-stage-arrow" aria-label={nextFlowCount + ' 條資料流往下游'}><span /><div><i /><ArrowDown /><b>{nextFlowCount} 條往下游</b></div><span /></div> : null}
@@ -262,7 +273,7 @@ export default function Home() {
   const [flowPeerId, setFlowPeerId] = useState('');
   const [syncState, setSyncState] = useState<'loading' | 'saved' | 'saving' | 'local' | 'conflict'>('loading');
   const [revision, setRevision] = useState(0);
-  const hydratedRef = useRef(false); const localChangeRef = useRef(false);
+  const hydratedRef = useRef(false); const localChangeRef = useRef(false); const dataRef = useRef(data); dataRef.current = data;
   const version = useMemo(() => data.versions.find((item) => item.id === versionId) ?? data.versions[0], [data, versionId]);
   const selectedModule = useMemo(() => findModule(version.modules, selectedModuleId) ?? version.modules[0], [version, selectedModuleId]);
   const selectedPath = useMemo(() => findModulePath(version.modules, selectedModuleId), [version, selectedModuleId]);
@@ -273,13 +284,19 @@ export default function Home() {
     try { const response = await fetch('/api/map', { cache: 'no-store' }); if (!response.ok) throw new Error('sync'); const payload = await response.json() as { data: SystemMapData | null; revision: number; mode?: string }; if (payload.data?.versions?.length) setData(payload.data); setRevision(payload.revision ?? 0); setSyncState(payload.mode === 'memory' ? 'local' : 'saved'); }
     catch { setSyncState('local'); } finally { hydratedRef.current = true; }
   }, []);
-  useEffect(() => { void loadShared(); const timer = window.setInterval(() => void loadShared(true), 5000); return () => window.clearInterval(timer); }, [loadShared]);
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState === 'visible') void loadShared(true); };
+    void loadShared();
+    const timer = window.setInterval(refresh, 30000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', refresh); };
+  }, [loadShared]);
   useEffect(() => {
     if (!hydratedRef.current || !localChangeRef.current) return;
     const timer = window.setTimeout(async () => {
       setSyncState('saving');
       try { const response = await fetch('/api/map', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data, revision }) }); const payload = await response.json() as { data?: SystemMapData; revision?: number; mode?: string }; if (response.status === 409) { if (payload.data) setData(payload.data); setRevision(payload.revision ?? revision); setSyncState('conflict'); } else if (!response.ok) throw new Error('save'); else { setRevision(payload.revision ?? revision + 1); setSyncState(payload.mode === 'memory' ? 'local' : 'saved'); } } catch { setSyncState('local'); } finally { localChangeRef.current = false; }
-    }, 550); return () => window.clearTimeout(timer);
+    }, 1000); return () => window.clearTimeout(timer);
   }, [data, revision]);
 
   const mutate = (updater: (current: SystemMapData) => SystemMapData) => { localChangeRef.current = true; setData(updater); };
@@ -361,15 +378,15 @@ export default function Home() {
 
   useEffect(() => {
     const modelContext = (document as Document & { modelContext?: { registerTool: (tool: unknown, options?: { signal?: AbortSignal }) => void | Promise<void> } }).modelContext; if (!modelContext?.registerTool) return; const lifecycle = new AbortController();
-    const registration = modelContext.registerTool({ name: 'open_system_module', title: '開啟系統模組', description: '切換到指定系統版本，並在視覺化地圖中開啟任意層級的模組文件面板。', inputSchema: { type: 'object', properties: { versionId: { type: 'string' }, moduleId: { type: 'string' } }, required: ['versionId', 'moduleId'], additionalProperties: false }, annotations: { readOnlyHint: true, untrustedContentHint: false }, async execute(input: unknown) { const value = input as { versionId?: string; moduleId?: string }; const targetVersion = data.versions.find((item) => item.id === value.versionId); const targetModule = targetVersion ? findModule(targetVersion.modules, value.moduleId ?? '') : undefined; if (!targetVersion || !targetModule) throw new Error('找不到指定的版本或模組。'); setVersionId(targetVersion.id); setSelectedModuleId(targetModule.id); setSelectedTopicId(targetModule.topics[0]?.id ?? null); await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); return { version: targetVersion.label, module: targetModule.name, topics: targetModule.topics.length }; } }, { signal: lifecycle.signal });
+    const registration = modelContext.registerTool({ name: 'open_system_module', title: '開啟系統模組', description: '切換到指定系統版本，並在視覺化地圖中開啟任意層級的模組文件面板。', inputSchema: { type: 'object', properties: { versionId: { type: 'string' }, moduleId: { type: 'string' } }, required: ['versionId', 'moduleId'], additionalProperties: false }, annotations: { readOnlyHint: true, untrustedContentHint: false }, async execute(input: unknown) { const value = input as { versionId?: string; moduleId?: string }; const targetVersion = dataRef.current.versions.find((item) => item.id === value.versionId); const targetModule = targetVersion ? findModule(targetVersion.modules, value.moduleId ?? '') : undefined; if (!targetVersion || !targetModule) throw new Error('找不到指定的版本或模組。'); setVersionId(targetVersion.id); setSelectedModuleId(targetModule.id); setSelectedTopicId(targetModule.topics[0]?.id ?? null); await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); return { version: targetVersion.label, module: targetModule.name, topics: targetModule.topics.length }; } }, { signal: lifecycle.signal });
     void Promise.resolve(registration).catch(() => undefined); return () => lifecycle.abort();
-  }, [data.versions]);
+  }, []);
 
   const exportVersion = (format: 'md' | 'html' | 'json') => { const base = `${data.systemName}-${version.label}`.replace(/\s+/g, '-'); if (format === 'md') downloadFile(`${base}.md`, versionMarkdown(version, data.systemName), 'text/markdown;charset=utf-8'); if (format === 'html') downloadFile(`${base}.html`, versionHtml(version, data.systemName), 'text/html;charset=utf-8'); if (format === 'json') downloadFile(`${base}.json`, JSON.stringify(version, null, 2), 'application/json;charset=utf-8'); };
   const syncLabel = syncState === 'saving' ? '儲存中…' : syncState === 'saved' ? '共同編輯 · 已同步' : syncState === 'conflict' ? '已載入其他人的更新' : syncState === 'loading' ? '連線中…' : '本機預覽模式';
 
   return <main className="system-shell">
-    <header className="topbar"><div className="brand-block"><div className="brand-symbol" aria-hidden="true"><Layers3 /></div><div><p className="eyebrow">系統地圖</p><h1>{data.systemName}</h1></div></div><div className="topbar-actions"><span className={`sync-state ${syncState}`}><i />{syncLabel}</span><DropdownMenu><DropdownMenuTrigger render={<Button variant="outline" className="export-button" />}><Download />匯出文件</DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => exportVersion('md')}><FileText />Markdown (.md)</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('html')}><Code2 />HTML (.html)</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('json')}><FileJson />JSON 資料</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></header>
+    <header className="topbar"><div className="brand-block"><div className="brand-symbol" aria-hidden="true"><Layers3 /></div><div><p className="eyebrow">SYSTEM MAP</p><h1>{data.systemName}</h1></div></div><div className="topbar-actions"><span className={`sync-state ${syncState}`}><i />{syncLabel}</span><DropdownMenu><DropdownMenuTrigger render={<Button variant="outline" className="export-button" />}><Download />匯出文件</DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => exportVersion('md')}><FileText />Markdown (.md)</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('html')}><Code2 />HTML (.html)</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('json')}><FileJson />JSON 資料</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></header>
     <section className="version-strip" aria-label="系統版本">
       <div className="version-selector"><span className="field-label">系統版本</span><Select value={version.id} onValueChange={(value) => value && chooseVersion(value)}><SelectTrigger aria-label="選擇系統版本"><SelectValue /></SelectTrigger><SelectContent align="start" alignItemWithTrigger={false} sideOffset={8}>{data.versions.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.state}</SelectItem>)}</SelectContent></Select>
         <Dialog><DialogTrigger render={<Button type="button" variant="outline" size="sm" className="version-edit-button" />}><Settings2 />編輯</DialogTrigger><DialogContent className="version-edit-dialog"><DialogHeader><DialogTitle>編輯系統與版本</DialogTitle><DialogDescription>這些名稱與說明會同步顯示在地圖及匯出文件。</DialogDescription></DialogHeader><div className="version-form">
@@ -384,9 +401,9 @@ export default function Home() {
     </section>
     <div className="workspace">
       <section className="map-panel" aria-label="系統模組視覺化"><div className="map-toolbar"><div className="search-box"><Search aria-hidden="true" /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜尋模組或暫存實例…" aria-label="搜尋系統狀態" /></div><div className="filter-set" aria-label="模組健康狀態篩選">{(['all', 'healthy', 'watch', 'risk'] as const).map((filter) => <button key={filter} type="button" className={healthFilter === filter ? 'active' : ''} onClick={() => setHealthFilter(filter)}>{filter === 'all' ? '全部' : healthMeta[filter].label}{filter !== 'all' ? <b>{healthCounts[filter]}</b> : null}</button>)}</div></div>
-        <div className="system-canvas"><div className="canvas-header"><div><span className="canvas-kicker">{version.label} · 系統結構</span><h2>模組、資料流與暫存狀態</h2></div><span className="canvas-hint"><CircleDot />點擊模組即可編輯</span></div>
+        <div className="system-canvas"><div className="canvas-header"><div><span className="canvas-kicker">LIVE ARCHITECTURE / {version.label}</span><h2>模組、資料流與暫存狀態</h2></div><span className="canvas-hint"><CircleDot />點擊模組編輯狀態</span></div>
           <FullSystemFlow modules={version.modules} flows={version.flows ?? []} selectedId={selectedModule.id} visibleIds={visibleModuleIds} onSelect={(target) => { setSelectedModuleId(target.id); setSelectedTopicId(target.topics[0]?.id ?? null); setFlowPeerId(''); }} /></div>
-        <footer className="attention-bar"><div><Database /><span><strong>{allModules.reduce((sum, module) => sum + moduleSpaceCount(module), 0)} 個暫存實例</strong>，目前共 {totalRecords} 筆資料；沒有資料的項目會顯示為空。</span></div><button type="button" onClick={() => setHealthFilter('risk')}>只看風險模組 <ChevronRight /></button></footer></section>
+        <footer className="attention-bar"><div><Database /><span><strong>{allModules.reduce((sum, module) => sum + moduleSpaceCount(module), 0)} 個暫存實例</strong>，目前共 {totalRecords} 筆資料；空杯代表 0 筆。</span></div><button type="button" onClick={() => setHealthFilter('risk')}>只看風險模組 <ChevronRight /></button></footer></section>
       {selectedModule ? <aside className="detail-panel" aria-label={`${selectedModule.name} 詳細資訊`}>
         <div className="module-breadcrumb" aria-label="模組層級">{selectedPath.map((item, index) => <span key={item.id}>{index ? <ChevronRight /> : null}<button type="button" onClick={() => { setSelectedModuleId(item.id); setSelectedTopicId(item.topics[0]?.id ?? null); }}>{item.name}</button></span>)}</div>
         <div className="detail-head" style={{ '--module-color': selectedModule.color } as React.CSSProperties}>
