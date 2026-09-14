@@ -19,6 +19,7 @@ type DataFlow = { id: string; sourceId: string; targetId: string; label: string 
 type SystemModule = { id: string; name: string; code: string; summary: string; health: ModuleHealth; color: string; spaces: TempSpace[]; topics: Topic[]; children?: SystemModule[] };
 type SystemVersion = { id: string; label: string; release: string; state: '現行' | '候選' | '封存'; description: string; modules: SystemModule[]; flows?: DataFlow[] };
 type SystemMapData = { systemName: string; versions: SystemVersion[] };
+type ModuleEntry = { module: SystemModule; parentId: string | null; path: string[]; depth: number };
 
 const nowLabel = () => new Intl.DateTimeFormat('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date());
 const makeId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
@@ -63,6 +64,10 @@ const topicMeta: Record<TopicStatus, { label: string; icon: typeof Clock3 }> = {
 const healthMeta: Record<ModuleHealth, { label: string; tone: string }> = { healthy: { label: '穩定', tone: 'ok' }, watch: { label: '留意', tone: 'watch' }, risk: { label: '風險', tone: 'risk' } };
 
 const flattenModules = (modules: SystemModule[]): SystemModule[] => modules.flatMap((module) => [module, ...flattenModules(module.children ?? [])]);
+const flattenModuleEntries = (modules: SystemModule[], parentId: string | null = null, path: string[] = [], depth = 0): ModuleEntry[] => modules.flatMap((module) => {
+  const nextPath = [...path, module.name];
+  return [{ module, parentId, path: nextPath, depth }, ...flattenModuleEntries(module.children ?? [], module.id, nextPath, depth + 1)];
+});
 const findModule = (modules: SystemModule[], id: string): SystemModule | undefined => {
   for (const module of modules) {
     if (module.id === id) return module;
@@ -88,11 +93,18 @@ const expandedSpaceNames = (space: TempSpace) => {
 };
 const instanceCount = (space: TempSpace, index: number) => Math.max(0, Math.floor(Number(space.instanceCounts?.[index] ?? 0)) || 0);
 const moduleSpaceCount = (module: SystemModule) => module.spaces.reduce((sum, space) => sum + spaceQuantity(space), 0);
-const moduleRecordCount = (module: SystemModule): number => module.spaces.reduce((sum, space) => sum + expandedSpaceNames(space).reduce((spaceSum, _, index) => spaceSum + instanceCount(space, index), 0), 0) + (module.children ?? []).reduce((sum, child) => sum + moduleRecordCount(child), 0);
+const moduleOwnRecordCount = (module: SystemModule): number => module.spaces.reduce((sum, space) => sum + expandedSpaceNames(space).reduce((spaceSum, _, index) => spaceSum + instanceCount(space, index), 0), 0);
+const moduleRecordCount = (module: SystemModule): number => moduleOwnRecordCount(module) + (module.children ?? []).reduce((sum, child) => sum + moduleRecordCount(child), 0);
 const moduleMatches = (module: SystemModule, query: string, filter: 'all' | ModuleHealth): boolean => {
   const text = `${module.name} ${module.code} ${module.summary} ${module.spaces.map((space) => `${expandedSpaceNames(space).join(' ')} ${space.kind}`).join(' ')} ${module.topics.map((topic) => `${topic.title} ${topic.content}`).join(' ')}`.toLowerCase();
   const ownMatch = (!query || text.includes(query)) && (filter === 'all' || module.health === filter);
   return ownMatch || (module.children ?? []).some((child) => moduleMatches(child, query, filter));
+};
+const moduleOwnMatches = (module: SystemModule, query: string, filter: 'all' | ModuleHealth): boolean => {
+  const spaceText = module.spaces.map((space) => expandedSpaceNames(space).join(' ') + ' ' + space.kind).join(' ');
+  const topicText = module.topics.map((topic) => topic.title + ' ' + topic.content).join(' ');
+  const text = [module.name, module.code, module.summary, spaceText, topicText].join(' ').toLowerCase();
+  return (!query || text.includes(query)) && (filter === 'all' || module.health === filter);
 };
 
 function downloadFile(name: string, content: string, type: string) {
@@ -114,10 +126,10 @@ function versionHtml(version: SystemVersion, systemName: string) {
   return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escape(systemName)} ${escape(version.label)}</title><style>body{max-width:880px;margin:48px auto;padding:0 24px;font:16px/1.7 system-ui;color:#172035}h1,h2,h3{line-height:1.25}article{border-top:1px solid #d8dde8;padding:24px 0}.tag{display:inline-block;padding:2px 8px;background:#eef2f7;border-radius:4px;font-size:13px}</style></head><body><h1>${escape(systemName)} — ${escape(version.label)}</h1><p>${escape(version.release)} · ${escape(version.state)}</p><p>${escape(version.description)}</p><h2>模組資料流</h2><ul>${flows}</ul>${version.modules.map((module) => renderModule(module)).join('')}</body></html>`;
 }
 
-function CacheVessel({ name, count, compact = false }: { name: string; count: number; compact?: boolean }) {
+function CacheVessel({ name, count, compact = false, showZero = false }: { name: string; count: number; compact?: boolean; showZero?: boolean }) {
   const visibleBalls = Math.min(count, compact ? 6 : 12);
   return <span className={`cache-vessel ${count ? 'occupied' : 'empty'} ${compact ? 'compact' : ''}`} aria-label={`${name}，${count} 筆資料`}>
-    <span className="vessel-label"><b>{name}</b><small>{count ? `${count} 筆` : '空'}</small></span>
+    <span className="vessel-label"><b>{name}</b><small>{count ? count + ' 筆' : showZero ? '0 筆' : '空'}</small></span>
     <span className="vessel-cup" aria-hidden="true"><span className="vessel-balls">{Array.from({ length: visibleBalls }, (_, index) => <i key={index} />)}</span>{count > visibleBalls ? <em>+{count - visibleBalls}</em> : null}</span>
   </span>;
 }
@@ -147,6 +159,79 @@ function FlowStage({ modules, flows, selectedModule, onSelect }: { modules: Syst
       {!outgoing.length ? <span className="flow-stage-empty">沒有指定下游模組</span> : null}
     </div>
     <div className="flow-tier-label downstream"><ArrowDown /><span>下游輸出</span><b>{outgoing.length}</b></div>
+  </section>;
+}
+
+function buildSystemFlowStages(modules: SystemModule[], flows: DataFlow[], visibleIds: Set<string>) {
+  const entries = flattenModuleEntries(modules);
+  const validIds = new Set(entries.map((entry) => entry.module.id));
+  const validFlows = flows.filter((flow) => validIds.has(flow.sourceId) && validIds.has(flow.targetId));
+  const connectedIds = new Set(validFlows.flatMap((flow) => [flow.sourceId, flow.targetId]));
+  const indegree = new Map(entries.map((entry) => [entry.module.id, 0]));
+  const rank = new Map(entries.map((entry) => [entry.module.id, 0]));
+  validFlows.forEach((flow) => indegree.set(flow.targetId, (indegree.get(flow.targetId) ?? 0) + 1));
+  const queue = entries.filter((entry) => connectedIds.has(entry.module.id) && (indegree.get(entry.module.id) ?? 0) === 0).map((entry) => entry.module.id);
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const sourceId = queue[cursor];
+    validFlows.filter((flow) => flow.sourceId === sourceId).forEach((flow) => {
+      rank.set(flow.targetId, Math.max(rank.get(flow.targetId) ?? 0, (rank.get(sourceId) ?? 0) + 1));
+      const nextIndegree = (indegree.get(flow.targetId) ?? 1) - 1;
+      indegree.set(flow.targetId, nextIndegree);
+      if (nextIndegree === 0) queue.push(flow.targetId);
+    });
+  }
+  entries.forEach((entry) => {
+    if (!connectedIds.has(entry.module.id)) rank.set(entry.module.id, entry.parentId ? rank.get(entry.parentId) ?? 0 : 0);
+  });
+  const grouped = new Map<number, ModuleEntry[]>();
+  entries.filter((entry) => visibleIds.has(entry.module.id)).forEach((entry) => {
+    const entryRank = rank.get(entry.module.id) ?? 0;
+    grouped.set(entryRank, [...(grouped.get(entryRank) ?? []), entry]);
+  });
+  return Array.from(grouped.entries()).sort(([left], [right]) => left - right).map(([stageRank, stageEntries]) => ({ rank: stageRank, entries: stageEntries, rankById: rank }));
+}
+
+function SystemFlowNode({ entry, modules, flows, selectedId, onSelect }: { entry: ModuleEntry; modules: SystemModule[]; flows: DataFlow[]; selectedId: string; onSelect: (module: SystemModule) => void }) {
+  const { module } = entry;
+  const incoming = flows.filter((flow) => flow.targetId === module.id && Boolean(findModule(modules, flow.sourceId)));
+  const outgoing = flows.filter((flow) => flow.sourceId === module.id && Boolean(findModule(modules, flow.targetId)));
+  const spaces = module.spaces.flatMap((space) => expandedSpaceNames(space).map((name, index) => ({ id: space.id + '-' + index, name, count: instanceCount(space, index) })));
+  return <button type="button" className={'system-flow-node ' + (entry.depth ? 'child ' : 'root ') + (selectedId === module.id ? 'selected' : '')} style={{ '--module-color': module.color } as React.CSSProperties} onClick={() => onSelect(module)} aria-label={module.name + (entry.depth ? '，子模組' : '，根模組')}>
+    <span className="system-flow-node-head"><span><small>{module.code}</small><strong>{module.name}</strong></span><span className={'health-mark ' + healthMeta[module.health].tone}>{healthMeta[module.health].label}</span></span>
+    <span className="system-flow-parent"><Layers3 /><span>{entry.depth ? '子模組 · ' + entry.path.slice(0, -1).join(' / ') : '根模組'}</span><b>{incoming.length} 入 / {outgoing.length} 出</b></span>
+    <span className="system-flow-cache-summary"><Database /><strong>{spaces.length} 個暫存實例</strong><span>{moduleOwnRecordCount(module)} 筆資料</span></span>
+    <span className="system-flow-caches">{spaces.map((space) => <CacheVessel compact showZero key={space.id} name={space.name} count={space.count} />)}{!spaces.length ? <span className="no-cache-state compact"><Database />無暫存空間</span> : null}</span>
+    <span className="system-flow-links">
+      {outgoing.map((flow) => { const target = findModule(modules, flow.targetId); return target ? <span key={flow.id}><b>{flow.label || '資料流'}</b><ArrowRight /><em>{target.name}</em></span> : null; })}
+      {!outgoing.length ? <span className="terminal"><CircleDot /><em>下游終點</em></span> : null}
+    </span>
+  </button>;
+}
+
+function FullSystemFlow({ modules, flows, selectedId, visibleIds, onSelect }: { modules: SystemModule[]; flows: DataFlow[]; selectedId: string; visibleIds: Set<string>; onSelect: (module: SystemModule) => void }) {
+  const entries = flattenModuleEntries(modules);
+  const stages = buildSystemFlowStages(modules, flows, visibleIds);
+  const visibleEntries = entries.filter((entry) => visibleIds.has(entry.module.id));
+  const visibleFlowCount = flows.filter((flow) => visibleIds.has(flow.sourceId) && visibleIds.has(flow.targetId)).length;
+  const cacheCount = visibleEntries.reduce((sum, entry) => sum + moduleSpaceCount(entry.module), 0);
+  const recordCount = visibleEntries.reduce((sum, entry) => sum + moduleOwnRecordCount(entry.module), 0);
+  const lastRank = stages.at(-1)?.rank ?? 0;
+  return <section className="full-system-flow" aria-label="完整系統上下游資料流">
+    <div className="full-system-flow-head"><div><span><Waypoints />完整系統資料流</span><strong>模組、子模組與暫存狀態</strong></div><div className="full-system-flow-metrics"><span><b>{visibleEntries.length}</b> 模組</span><span><b>{visibleFlowCount}</b> 資料流</span><span><b>{cacheCount}</b> 暫存</span><span><b>{recordCount}</b> 筆資料</span></div></div>
+    <div className="full-system-flow-board">
+      {stages.map((stage, stageIndex) => {
+        const stageName = stages.length === 1 ? '系統節點' : stage.rank === 0 ? '上游入口' : stage.rank === lastRank ? '下游輸出' : '處理階段 ' + (stage.rank + 1);
+        const nextFlowCount = flows.filter((flow) => stage.entries.some((entry) => entry.module.id === flow.sourceId) && visibleIds.has(flow.targetId) && (stage.rankById.get(flow.targetId) ?? stage.rank) > stage.rank).length;
+        return <div className="system-flow-stage-wrap" key={stage.rank}>
+          <section className="system-flow-stage" aria-label={stageName}>
+            <div className="system-flow-stage-label"><span>STAGE {stage.rank + 1}</span><strong>{stageName}</strong><b>{stage.entries.length} 個模組</b></div>
+            <div className="system-flow-node-grid">{stage.entries.map((entry) => <SystemFlowNode key={entry.module.id} entry={entry} modules={modules} flows={flows} selectedId={selectedId} onSelect={onSelect} />)}</div>
+          </section>
+          {stageIndex < stages.length - 1 ? <div className="system-flow-stage-arrow" aria-label={nextFlowCount + ' 條資料流往下游'}><span /><div><i /><ArrowDown /><b>{nextFlowCount} 條往下游</b></div><span /></div> : null}
+        </div>;
+      })}
+      {!stages.length ? <div className="map-empty"><Search /><strong>沒有符合的模組</strong><span>試著清除搜尋或切換狀態。</span></div> : null}
+    </div>
   </section>;
 }
 
@@ -270,7 +355,7 @@ export default function Home() {
   const currentParentId = selectedPath.at(-2)?.id ?? 'root';
   const flowCandidates = useMemo(() => allModules.filter((item) => item.id !== selectedModule.id).map((item) => ({ id: item.id, label: findModulePath(version.modules, item.id).map((part) => part.name).join(' / ') })), [allModules, selectedModule.id, version.modules]);
   const selectedFlows = useMemo(() => (version.flows ?? []).filter((flow) => flow.sourceId === selectedModule.id || flow.targetId === selectedModule.id), [selectedModule.id, version.flows]);
-  const visibleModules = useMemo(() => version.modules.filter((module) => moduleMatches(module, query.trim().toLowerCase(), healthFilter)), [healthFilter, query, version]);
+  const visibleModuleIds = useMemo(() => new Set(allModules.filter((module) => moduleOwnMatches(module, query.trim().toLowerCase(), healthFilter)).map((module) => module.id)), [allModules, healthFilter, query]);
   const healthCounts = useMemo(() => allModules.reduce((counts, module) => ({ ...counts, [module.health]: counts[module.health] + 1 }), { healthy: 0, watch: 0, risk: 0 } as Record<ModuleHealth, number>), [allModules]);
   const totalRecords = useMemo(() => version.modules.reduce((sum, module) => sum + moduleRecordCount(module), 0), [version.modules]);
 
@@ -300,9 +385,7 @@ export default function Home() {
     <div className="workspace">
       <section className="map-panel" aria-label="系統模組視覺化"><div className="map-toolbar"><div className="search-box"><Search aria-hidden="true" /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜尋模組或暫存實例…" aria-label="搜尋系統狀態" /></div><div className="filter-set" aria-label="模組健康狀態篩選">{(['all', 'healthy', 'watch', 'risk'] as const).map((filter) => <button key={filter} type="button" className={healthFilter === filter ? 'active' : ''} onClick={() => setHealthFilter(filter)}>{filter === 'all' ? '全部' : healthMeta[filter].label}{filter !== 'all' ? <b>{healthCounts[filter]}</b> : null}</button>)}</div></div>
         <div className="system-canvas"><div className="canvas-header"><div><span className="canvas-kicker">LIVE ARCHITECTURE / {version.label}</span><h2>模組、資料流與暫存狀態</h2></div><span className="canvas-hint"><CircleDot />點擊模組編輯狀態</span></div>
-          <FlowStage modules={version.modules} flows={version.flows ?? []} selectedModule={selectedModule} onSelect={(target) => { setSelectedModuleId(target.id); setSelectedTopicId(target.topics[0]?.id ?? null); setFlowPeerId(''); }} />
-          <div className="module-grid">{visibleModules.map((module, index) => <ModuleBranch key={module.id} module={module} index={index} flows={version.flows ?? []} selectedId={selectedModule.id} onSelect={(target) => { setSelectedModuleId(target.id); setSelectedTopicId(target.topics[0]?.id ?? null); setFlowPeerId(''); }} />)}</div>
-          {visibleModules.length === 0 ? <div className="map-empty"><Search /><strong>沒有符合的模組</strong><span>試著清除搜尋或切換狀態。</span></div> : null}</div>
+          <FullSystemFlow modules={version.modules} flows={version.flows ?? []} selectedId={selectedModule.id} visibleIds={visibleModuleIds} onSelect={(target) => { setSelectedModuleId(target.id); setSelectedTopicId(target.topics[0]?.id ?? null); setFlowPeerId(''); }} /></div>
         <footer className="attention-bar"><div><Database /><span><strong>{allModules.reduce((sum, module) => sum + moduleSpaceCount(module), 0)} 個暫存實例</strong>，目前共 {totalRecords} 筆資料；空杯代表 0 筆。</span></div><button type="button" onClick={() => setHealthFilter('risk')}>只看風險模組 <ChevronRight /></button></footer></section>
       {selectedModule ? <aside className="detail-panel" aria-label={`${selectedModule.name} 詳細資訊`}>
         <div className="module-breadcrumb" aria-label="模組層級">{selectedPath.map((item, index) => <span key={item.id}>{index ? <ChevronRight /> : null}<button type="button" onClick={() => { setSelectedModuleId(item.id); setSelectedTopicId(item.topics[0]?.id ?? null); }}>{item.name}</button></span>)}</div>
