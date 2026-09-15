@@ -368,7 +368,7 @@ export default function Home() {
   const [access, setAccess] = useState<AccessSession>(guestAccess);
   const [accessReady, setAccessReady] = useState(false);
   const [accessOpen, setAccessOpen] = useState(false);
-  const hydratedRef = useRef(false); const localChangeRef = useRef(false);
+  const hydratedRef = useRef(false); const localChangeRef = useRef(false); const mapEtagRef = useRef<string | null>(null); const syncingRef = useRef(false);
   const version = useMemo(() => data.versions.find((item) => item.id === versionId) ?? data.versions[0], [data, versionId]);
   const selectedModule = useMemo(() => findModule(version.modules, selectedModuleId) ?? version.modules[0] ?? null, [version, selectedModuleId]);
   const selectedPath = useMemo(() => findModulePath(version.modules, selectedModuleId), [version, selectedModuleId]);
@@ -380,16 +380,16 @@ export default function Home() {
   useEffect(() => { void loadAccess(); }, [loadAccess]);
 
   const loadShared = useCallback(async (quiet = false) => {
-    if (localChangeRef.current) return; if (!quiet) setSyncState('loading');
-    try { const response = await fetch('/api/map', { cache: 'no-store' }); if (!response.ok) throw new Error('sync'); const payload = await response.json() as { data: SystemMapData | null; revision: number; mode?: string }; if (payload.data?.versions?.length) setData(payload.data); setRevision(payload.revision ?? 0); setSyncState(payload.mode === 'memory' ? 'local' : 'saved'); }
-    catch { setSyncState('local'); } finally { hydratedRef.current = true; }
+    if (document.visibilityState !== 'visible' || localChangeRef.current || syncingRef.current) return; if (!quiet) setSyncState('loading'); syncingRef.current = true;
+    try { const response = await fetch('/api/map', { cache: 'no-store', headers: mapEtagRef.current ? { 'if-none-match': mapEtagRef.current } : undefined }); if (response.status === 304) return; if (!response.ok) throw new Error('sync'); const payload = await response.json() as { data: SystemMapData | null; revision: number; mode?: string }; mapEtagRef.current = response.headers.get('etag'); if (payload.data?.versions?.length) setData(payload.data); setRevision(payload.revision ?? 0); setSyncState(payload.mode === 'memory' ? 'local' : 'saved'); }
+    catch { setSyncState('local'); } finally { syncingRef.current = false; hydratedRef.current = true; }
   }, []);
-  useEffect(() => { void loadShared(); const timer = window.setInterval(() => void loadShared(true), 5000); return () => window.clearInterval(timer); }, [loadShared]);
+  useEffect(() => { const syncWhenVisible = () => { if (document.visibilityState === 'visible') void loadShared(true); }; void loadShared(); document.addEventListener('visibilitychange', syncWhenVisible); return () => document.removeEventListener('visibilitychange', syncWhenVisible); }, [loadShared]);
   useEffect(() => {
     if (!hydratedRef.current || !localChangeRef.current) return;
     const timer = window.setTimeout(async () => {
       setSyncState('saving');
-      try { const response = await fetch('/api/map', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data, revision }) }); const payload = await response.json() as { data?: SystemMapData; revision?: number; mode?: string }; if (response.status === 409) { if (payload.data) setData(payload.data); setRevision(payload.revision ?? revision); setSyncState('conflict'); } else if (!response.ok) throw new Error('save'); else { setRevision(payload.revision ?? revision + 1); setSyncState(payload.mode === 'memory' ? 'local' : 'saved'); } } catch { setSyncState('local'); } finally { localChangeRef.current = false; }
+      try { const response = await fetch('/api/map', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data, revision }) }); const payload = await response.json() as { data?: SystemMapData; revision?: number; mode?: string }; const nextEtag = response.headers.get('etag'); if (nextEtag) mapEtagRef.current = nextEtag; if (response.status === 409) { if (payload.data) setData(payload.data); setRevision(payload.revision ?? revision); setSyncState('conflict'); } else if (!response.ok) throw new Error('save'); else { setRevision(payload.revision ?? revision + 1); setSyncState(payload.mode === 'memory' ? 'local' : 'saved'); } } catch { setSyncState('local'); } finally { localChangeRef.current = false; }
     }, 550); return () => window.clearTimeout(timer);
   }, [data, revision]);
 
