@@ -1,11 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCircle2, ChevronRight, CircleDot, Clock3, Code2, Database, Download, FileJson, FileText, GitBranch, Layers3, MessageCircle, Plus, Search, Settings2, Trash2, Waypoints } from 'lucide-react';
+import { Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCircle2, ChevronRight, CircleDot, Clock3, Code2, Database, Download, FileJson, FileText, GitBranch, Layers3, MessageCircle, Plus, Search, Settings2, Trash2, Upload, Waypoints } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -194,6 +194,64 @@ function fullSystemJson(data: SystemMapData, exportedAt: string) {
   return JSON.stringify({ schemaVersion: 'system-map-export/v2', exportedAt, systemName: data.systemName, versionCount: data.versions.length, versions: data.versions.map((version) => ({ ...version, summary: versionSummary(version), flows: (version.flows ?? []).map((flow) => { const source = resolveFlowEndpoint(version.modules, flow.sourceId); const target = resolveFlowEndpoint(version.modules, flow.targetId); return { ...flow, source: { id: flow.sourceId, type: source?.type ?? 'unknown', path: source?.path ?? flow.sourceId }, target: { id: flow.targetId, type: target?.type ?? 'unknown', path: target?.path ?? flow.targetId } }; }), modules: version.modules.map((module) => enrichModule(module, [])) })) }, null, 2);
 }
 
+function databaseBackupJson(data: SystemMapData, exportedAt: string) {
+  return JSON.stringify({ schemaVersion: 'system-map-backup/v1', exportedAt, data }, null, 2);
+}
+
+const isObject = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const requiredText = (value: unknown, label: string) => { if (typeof value !== 'string' || !value.trim()) throw new Error(`${label}缺少必要文字。`); return value; };
+const optionalText = (value: unknown) => typeof value === 'string' ? value : '';
+const importedCount = (value: unknown) => Math.max(0, Math.floor(Number(value)) || 0);
+
+function parseSystemBackup(payload: unknown): SystemMapData {
+  if (!isObject(payload)) throw new Error('備份檔案不是有效的 JSON 物件。');
+  const candidate = payload.schemaVersion === 'system-map-backup/v1' ? payload.data : payload;
+  if (!isObject(candidate) || !Array.isArray(candidate.versions) || !candidate.versions.length) throw new Error('備份中找不到任何系統版本。');
+  const parseModule = (value: unknown, seenIds: Set<string>): SystemModule => {
+    if (!isObject(value)) throw new Error('模組資料格式不正確。');
+    const id = requiredText(value.id, '模組 ID'); if (seenIds.has(id)) throw new Error(`備份中有重複的節點 ID：${id}`); seenIds.add(id);
+    const spaces = Array.isArray(value.spaces) ? value.spaces.map((spaceValue) => {
+      if (!isObject(spaceValue)) throw new Error('暫存空間資料格式不正確。');
+      const spaceId = requiredText(spaceValue.id, '暫存空間 ID'); if (seenIds.has(spaceId)) throw new Error(`備份中有重複的節點 ID：${spaceId}`); seenIds.add(spaceId);
+      const quantity = Math.max(1, Math.floor(Number(spaceValue.quantity)) || 1);
+      const counts = Array.isArray(spaceValue.instanceCounts) ? spaceValue.instanceCounts : [];
+      return { id: spaceId, name: requiredText(spaceValue.name, '暫存空間名稱'), kind: optionalText(spaceValue.kind), detail: optionalText(spaceValue.detail), quantity, instanceCounts: Array.from({ length: quantity }, (_, index) => importedCount(counts[index])) };
+    }) : [];
+    const topics = Array.isArray(value.topics) ? value.topics.map((topicValue) => {
+      if (!isObject(topicValue)) throw new Error('主題資料格式不正確。');
+      const statusValue = topicValue.status; if (statusValue !== 'draft' && statusValue !== 'discussion' && statusValue !== 'reviewed') throw new Error('主題狀態不正確。'); const status: TopicStatus = statusValue;
+      return { id: requiredText(topicValue.id, '主題 ID'), title: requiredText(topicValue.title, '主題名稱'), content: optionalText(topicValue.content), status, updatedAt: optionalText(topicValue.updatedAt) };
+    }) : [];
+    const health = value.health; if (health !== 'healthy' && health !== 'watch' && health !== 'risk') throw new Error('模組健康狀態不正確。');
+    return { id, name: requiredText(value.name, '模組名稱'), code: optionalText(value.code), summary: optionalText(value.summary), health, color: typeof value.color === 'string' && /^#[0-9a-f]{6}$/i.test(value.color) ? value.color : '#63d8c7', spaces, topics, children: Array.isArray(value.children) ? value.children.map((child) => parseModule(child, seenIds)) : [] };
+  };
+  const versions = candidate.versions.map((versionValue) => {
+    if (!isObject(versionValue)) throw new Error('系統版本資料格式不正確。');
+    const seenIds = new Set<string>(); const modules = Array.isArray(versionValue.modules) ? versionValue.modules.map((module) => parseModule(module, seenIds)) : [];
+    const stateValue = versionValue.state; if (stateValue !== '現行' && stateValue !== '候選' && stateValue !== '封存') throw new Error('系統版本狀態不正確。'); const state: SystemVersion['state'] = stateValue;
+    const flows = Array.isArray(versionValue.flows) ? versionValue.flows.map((flowValue) => {
+      if (!isObject(flowValue)) throw new Error('資料流格式不正確。');
+      const sourceId = requiredText(flowValue.sourceId, '資料流來源'); const targetId = requiredText(flowValue.targetId, '資料流目標');
+      if (!seenIds.has(sourceId) || !seenIds.has(targetId)) throw new Error('資料流連到不存在的模組或暫存空間。');
+      return { id: requiredText(flowValue.id, '資料流 ID'), sourceId, targetId, label: optionalText(flowValue.label) };
+    }) : [];
+    return { id: requiredText(versionValue.id, '系統版本 ID'), label: requiredText(versionValue.label, '系統版本名稱'), release: optionalText(versionValue.release), state, description: optionalText(versionValue.description), modules, flows };
+  });
+  return { systemName: requiredText(candidate.systemName, '系統名稱'), versions };
+}
+
+function cloneImportedVersion(source: SystemVersion, label: string): SystemVersion {
+  const idMap = new Map<string, string>();
+  const cloneModule = (module: SystemModule): SystemModule => {
+    const id = makeId('module'); idMap.set(module.id, id);
+    const spaces = module.spaces.map((space) => { const spaceId = makeId('space'); idMap.set(space.id, spaceId); return { ...space, id: spaceId, instanceCounts: [...(space.instanceCounts ?? [])] }; });
+    return { ...module, id, spaces, topics: module.topics.map((topic) => ({ ...topic, id: makeId('topic') })), children: (module.children ?? []).map(cloneModule) };
+  };
+  const modules = source.modules.map(cloneModule);
+  const flows = (source.flows ?? []).flatMap((flow) => { const sourceId = idMap.get(flow.sourceId); const targetId = idMap.get(flow.targetId); return sourceId && targetId ? [{ ...flow, id: makeId('flow'), sourceId, targetId }] : []; });
+  return { ...source, id: makeId('version'), label: label.trim(), modules, flows };
+}
+
 function CacheVessel({ name, count, compact = false }: { name: string; count: number; compact?: boolean }) {
   const visibleBalls = Math.min(count, compact ? 6 : 12);
   return <span className={`cache-vessel ${count ? 'occupied' : 'empty'} ${compact ? 'compact' : ''}`} aria-label={`${name}，${count} 筆資料`}>
@@ -221,6 +279,7 @@ type FlowPath = { id: string; label: string; d: string; labelX: number; labelY: 
 
 function UnifiedFlowMap({ modules, flows, selectedId, layout, onLayoutChange, onSelect, onAddRoot }: { modules: SystemModule[]; flows: DataFlow[]; selectedId: string; layout: FlowLayout; onLayoutChange: (layout: FlowLayout) => void; onSelect: (module: SystemModule) => void; onAddRoot: () => void }) {
   const sceneRef = useRef<HTMLDivElement>(null); const endpointRefs = useRef(new Map<string, HTMLElement>()); const [paths, setPaths] = useState<FlowPath[]>([]);
+  const [expandedCacheModules, setExpandedCacheModules] = useState<Set<string>>(() => new Set());
   const flat = useMemo(() => flattenModules(modules), [modules]); const spaces = useMemo(() => flattenSpaceEndpoints(modules), [modules]);
   const visibleIds = useMemo(() => new Set([...flat.map((module) => module.id), ...spaces.map((entry) => entry.space.id)]), [flat, spaces]);
   const visibleFlows = useMemo(() => flows.filter((flow) => visibleIds.has(flow.sourceId) && visibleIds.has(flow.targetId)), [flows, visibleIds]);
@@ -239,11 +298,14 @@ function UnifiedFlowMap({ modules, flows, selectedId, layout, onLayoutChange, on
       else { const forward = dy >= 0; startX = source.left + source.width / 2 - bounds.left; endX = target.left + target.width / 2 - bounds.left; startY = (forward ? source.bottom : source.top) - bounds.top; endY = (forward ? target.top : target.bottom) - bounds.top; const bend = Math.max(36, Math.abs(endY - startY) * .45); d = `M ${startX} ${startY} C ${startX} ${startY + (forward ? bend : -bend)}, ${endX} ${endY + (forward ? -bend : bend)}, ${endX} ${endY}`; }
       return [{ id: flow.id, label: flow.label || (resolveFlowEndpoint(modules, flow.targetId)?.type === 'space' ? '寫入暫存' : '資料流'), d, labelX: (startX + endX) / 2, labelY: (startY + endY) / 2 - 7 }]; }));
   }, [layout, modules, visibleFlows]);
-  useEffect(() => { const frame = requestAnimationFrame(measurePaths); const observer = new ResizeObserver(measurePaths); if (sceneRef.current) observer.observe(sceneRef.current); endpointRefs.current.forEach((node) => observer.observe(node)); return () => { cancelAnimationFrame(frame); observer.disconnect(); }; }, [flat, layout, measurePaths, spaces]);
+  useEffect(() => { const frame = requestAnimationFrame(measurePaths); const observer = new ResizeObserver(measurePaths); if (sceneRef.current) observer.observe(sceneRef.current); endpointRefs.current.forEach((node) => observer.observe(node)); return () => { cancelAnimationFrame(frame); observer.disconnect(); }; }, [expandedCacheModules, flat, layout, measurePaths, spaces]);
 
   const renderModule = (module: SystemModule, depth = 0): React.ReactNode => {
     const incomingCount = visibleFlows.filter((flow) => flow.targetId === module.id || findSpaceEndpoint(modules, flow.targetId)?.owner.id === module.id).length;
     const outgoingCount = visibleFlows.filter((flow) => flow.sourceId === module.id).length;
+    const cacheExpanded = expandedCacheModules.has(module.id);
+    const cacheRecordCount = ownRecordCount(module);
+    const setCacheSummaryRef = (node: HTMLButtonElement | null) => module.spaces.forEach((space) => setEndpointRef(space.id, node));
     return <article className={`graph-module-shell ${selectedId === module.id ? 'selected' : ''}`} style={{ '--module-color': module.color } as React.CSSProperties} key={module.id}>
       <button ref={(node) => setEndpointRef(module.id, node)} type="button" className="graph-module-node" onClick={() => onSelect(module)}>
         <span className="graph-module-top"><small>{module.code}</small><span className={`health-mark ${healthMeta[module.health].tone}`}>{healthMeta[module.health].label}</span></span>
@@ -251,7 +313,7 @@ function UnifiedFlowMap({ modules, flows, selectedId, layout, onLayoutChange, on
         <span className="graph-record-total"><Database /><b>{ownRecordCount(module)}</b><small>筆資料</small>{(module.children ?? []).length ? <em>含子模組 {moduleRecordCount(module)} 筆</em> : null}</span>
         <span className="graph-flow-count"><span><ArrowLeft />{incomingCount} 輸入</span><span>{outgoingCount} 輸出<ArrowRight /></span></span>
       </button>
-      {module.spaces.length ? <div className="graph-cache-groups">{module.spaces.map((space) => <button ref={(node) => setEndpointRef(space.id, node)} type="button" className="graph-cache-group" key={space.id} onClick={() => onSelect(module)} aria-label={`${space.name} 暫存群組，共 ${spaceQuantity(space)} 個實例`}><span className="graph-cache-group-head"><span><Archive /><b>{space.name}</b></span><small>{space.kind} · {spaceQuantity(space)} 個</small></span><span className="graph-cache-rack">{expandedSpaceNames(space).map((name, index) => <CacheVessel compact key={`${space.id}-${index}`} name={name} count={instanceCount(space, index)} />)}</span></button>)}</div> : null}
+      {module.spaces.length ? <div className="graph-cache-section"><button ref={cacheExpanded ? undefined : setCacheSummaryRef} type="button" className="graph-cache-toggle" aria-expanded={cacheExpanded} onClick={() => setExpandedCacheModules((current) => { const next = new Set(current); if (next.has(module.id)) next.delete(module.id); else next.add(module.id); return next; })}><span><Archive /><b>暫存空間</b></span><small>{module.spaces.length} 區 · {moduleSpaceCount(module)} 個實例 · {cacheRecordCount} 筆</small><ChevronRight /></button>{cacheExpanded ? <div className="graph-cache-groups">{module.spaces.map((space) => <button ref={(node) => setEndpointRef(space.id, node)} type="button" className="graph-cache-group" key={space.id} onClick={() => onSelect(module)} aria-label={`${space.name} 暫存群組，共 ${spaceQuantity(space)} 個實例`}><span className="graph-cache-group-head"><span><Archive /><b>{space.name}</b></span><small>{space.kind} · {spaceQuantity(space)} 個</small></span><span className="graph-cache-rack">{expandedSpaceNames(space).map((name, index) => <CacheVessel compact key={`${space.id}-${index}`} name={name} count={instanceCount(space, index)} />)}</span></button>)}</div> : null}</div> : null}
       {(module.children ?? []).length ? <div className="graph-children"><span className="graph-children-label"><GitBranch />{module.name} 的子模組</span>{(module.children ?? []).map((child) => renderModule(child, depth + 1))}</div> : null}
     </article>;
   };
@@ -278,6 +340,13 @@ export default function Home() {
   const [flowLayout, setFlowLayout] = useState<FlowLayout>('left-to-right');
   const [syncState, setSyncState] = useState<'loading' | 'saved' | 'saving' | 'local' | 'conflict'>('loading');
   const [revision, setRevision] = useState(0);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importMode, setImportMode] = useState<'append' | 'replace'>('append');
+  const [importedBackup, setImportedBackup] = useState<SystemMapData | null>(null);
+  const [importSourceVersionId, setImportSourceVersionId] = useState('');
+  const [importVersionName, setImportVersionName] = useState('');
+  const [importFileName, setImportFileName] = useState('');
+  const [importError, setImportError] = useState('');
   const hydratedRef = useRef(false); const localChangeRef = useRef(false);
   const version = useMemo(() => data.versions.find((item) => item.id === versionId) ?? data.versions[0], [data, versionId]);
   const selectedModule = useMemo(() => findModule(version.modules, selectedModuleId) ?? version.modules[0] ?? null, [version, selectedModuleId]);
@@ -408,11 +477,33 @@ export default function Home() {
     void Promise.resolve(registration).catch(() => undefined); return () => lifecycle.abort();
   }, [data.versions]);
 
-  const exportVersion = (format: 'md' | 'html' | 'json') => { const exportedAt = new Date().toISOString(); const versionBase = safeFileName(`${data.systemName}-${version.label}`); if (format === 'md') downloadFile(`${versionBase}.md`, versionMarkdown(version, data.systemName, exportedAt), 'text/markdown;charset=utf-8'); if (format === 'html') downloadFile(`${versionBase}.html`, versionHtml(version, data.systemName, exportedAt, flowLayout), 'text/html;charset=utf-8'); if (format === 'json') downloadFile(`${safeFileName(data.systemName)}-完整系統.json`, fullSystemJson(data, exportedAt), 'application/json;charset=utf-8'); };
+  const exportVersion = (format: 'md' | 'html' | 'json' | 'backup') => { const exportedAt = new Date().toISOString(); const versionBase = safeFileName(`${data.systemName}-${version.label}`); if (format === 'md') downloadFile(`${versionBase}.md`, versionMarkdown(version, data.systemName, exportedAt), 'text/markdown;charset=utf-8'); if (format === 'html') downloadFile(`${versionBase}.html`, versionHtml(version, data.systemName, exportedAt, flowLayout), 'text/html;charset=utf-8'); if (format === 'json') downloadFile(`${safeFileName(data.systemName)}-完整系統報表.json`, fullSystemJson(data, exportedAt), 'application/json;charset=utf-8'); if (format === 'backup') downloadFile(`${safeFileName(data.systemName)}-資料庫備份.json`, databaseBackupJson(data, exportedAt), 'application/json;charset=utf-8'); };
+  const selectImportFile = async (file: File | undefined) => {
+    setImportedBackup(null); setImportError(''); setImportFileName(file?.name ?? '');
+    if (!file) return;
+    if (file.size > 1_000_000) { setImportError('備份檔案超過 1 MB，無法匯入。'); return; }
+    try {
+      const parsed = parseSystemBackup(JSON.parse(await file.text()));
+      if (JSON.stringify(parsed).length > 500_000) throw new Error('備份內容超過資料庫可儲存的 500 KB。');
+      setImportedBackup(parsed); const source = parsed.versions[0]; setImportSourceVersionId(source.id); setImportVersionName(source.label);
+    } catch (error) { setImportError(error instanceof Error ? error.message : '無法讀取備份檔案。'); }
+  };
+  const applyImport = () => {
+    if (!importedBackup) return;
+    if (importMode === 'replace') {
+      const first = importedBackup.versions[0]; mutate(() => importedBackup); setVersionId(first.id); setSelectedModuleId(first.modules[0]?.id ?? ''); setSelectedTopicId(first.modules[0]?.topics[0]?.id ?? null);
+    } else {
+      const source = importedBackup.versions.find((item) => item.id === importSourceVersionId); if (!source || !importVersionName.trim()) { setImportError('請選擇來源版本並填寫匯入後的版本名稱。'); return; }
+      const imported = cloneImportedVersion(source, importVersionName); const nextData = { ...data, versions: [...data.versions, imported] };
+      if (JSON.stringify(nextData).length > 500_000) { setImportError('加入這個版本後會超過資料庫 500 KB 上限。'); return; }
+      mutate(() => nextData); setVersionId(imported.id); setSelectedModuleId(imported.modules[0]?.id ?? ''); setSelectedTopicId(imported.modules[0]?.topics[0]?.id ?? null);
+    }
+    setFlowPeerId(''); setImportOpen(false); setImportedBackup(null); setImportFileName(''); setImportError('');
+  };
   const syncLabel = syncState === 'saving' ? '儲存中…' : syncState === 'saved' ? '共同編輯 · 已同步' : syncState === 'conflict' ? '已載入其他人的更新' : syncState === 'loading' ? '連線中…' : '本機預覽模式';
 
   return <main className="system-shell">
-    <header className="topbar"><div className="brand-block"><div className="brand-symbol" aria-hidden="true"><Layers3 /></div><div><p className="eyebrow">SYSTEM MAP</p><h1>{data.systemName}</h1></div></div><div className="topbar-actions"><span className={`sync-state ${syncState}`}><i />{syncLabel}</span><DropdownMenu><DropdownMenuTrigger render={<Button variant="outline" className="export-button" />}><Download />匯出文件</DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => exportVersion('md')}><FileText />目前版本 Markdown</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('html')}><Code2 />目前版本 HTML</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('json')}><FileJson />完整系統 JSON 備份</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></header>
+    <header className="topbar"><div className="brand-block"><div className="brand-symbol" aria-hidden="true"><Layers3 /></div><div><p className="eyebrow">SYSTEM MAP</p><h1>{data.systemName}</h1></div></div><div className="topbar-actions"><span className={`sync-state ${syncState}`}><i />{syncLabel}</span><Dialog open={importOpen} onOpenChange={setImportOpen}><DialogTrigger render={<Button variant="outline" className="export-button" />}><Upload />匯入備份</DialogTrigger><DialogContent className="backup-dialog"><DialogHeader><DialogTitle>匯入資料庫備份</DialogTitle><DialogDescription>可完整還原整個資料庫，或挑選一個備份版本，以新名稱加入目前系統。</DialogDescription></DialogHeader><div className="backup-form"><label className="backup-file"><span>備份檔案</span><input type="file" accept="application/json,.json" onChange={(event) => void selectImportFile(event.target.files?.[0])} /><strong>{importFileName || '選擇 JSON 備份檔'}</strong></label>{importedBackup ? <><div className="backup-summary"><Database /><span><strong>{importedBackup.systemName}</strong><small>{importedBackup.versions.length} 個系統版本 · {importedBackup.versions.reduce((sum, item) => sum + flattenModules(item.modules).length, 0)} 個模組</small></span></div><div className="backup-field"><span>匯入方式</span><Select value={importMode} onValueChange={(value) => value && setImportMode(value as 'append' | 'replace')}><SelectTrigger aria-label="選擇匯入方式"><SelectValue>{importMode === 'append' ? '新增為系統版本' : '完整取代目前資料庫'}</SelectValue></SelectTrigger><SelectContent align="start" alignItemWithTrigger={false}><SelectItem value="append">新增為系統版本</SelectItem><SelectItem value="replace">完整取代目前資料庫</SelectItem></SelectContent></Select></div>{importMode === 'append' ? <><div className="backup-field"><span>來源版本</span><Select value={importSourceVersionId} onValueChange={(value) => { if (!value) return; setImportSourceVersionId(value); const source = importedBackup.versions.find((item) => item.id === value); if (source) setImportVersionName(source.label); }}><SelectTrigger aria-label="選擇備份中的系統版本"><SelectValue>{importedBackup.versions.find((item) => item.id === importSourceVersionId)?.label ?? '選擇版本'}</SelectValue></SelectTrigger><SelectContent align="start" alignItemWithTrigger={false}>{importedBackup.versions.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.state}</SelectItem>)}</SelectContent></Select></div><label htmlFor="import-version-name"><span>匯入後的版本名稱</span><Input id="import-version-name" value={importVersionName} onChange={(event) => setImportVersionName(event.target.value)} /></label></> : <p className="backup-warning">目前所有版本會被備份內容取代。執行前請先匯出一份最新資料庫備份。</p>}</> : null}{importError ? <p className="backup-error" role="alert">{importError}</p> : null}</div><DialogFooter><DialogClose render={<Button type="button" variant="outline" />}>取消</DialogClose><Button type="button" variant={importMode === 'replace' ? 'destructive' : 'default'} disabled={!importedBackup || importMode === 'append' && !importVersionName.trim()} onClick={applyImport}>{importMode === 'replace' ? '完整還原' : '匯入版本'}</Button></DialogFooter></DialogContent></Dialog><DropdownMenu><DropdownMenuTrigger render={<Button variant="outline" className="export-button" />}><Download />匯出</DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => exportVersion('md')}><FileText />目前版本 Markdown</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('html')}><Code2 />目前版本 HTML</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('json')}><FileJson />完整系統 JSON 報表</DropdownMenuItem><DropdownMenuItem onClick={() => exportVersion('backup')}><Database />完整資料庫備份</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></header>
     <section className="version-strip" aria-label="系統版本">
       <div className="version-selector"><span className="field-label">系統版本</span><Select value={version.id} onValueChange={(value) => value && chooseVersion(value)}><SelectTrigger aria-label="選擇系統版本"><SelectValue>{version.label} · {version.state}</SelectValue></SelectTrigger><SelectContent align="start" alignItemWithTrigger={false} sideOffset={8}>{data.versions.map((item) => <SelectItem key={item.id} value={item.id}>{item.label} · {item.state}</SelectItem>)}</SelectContent></Select><Button type="button" variant="outline" size="sm" className="version-add-button" onClick={addVersion}><Plus />新增</Button>
         <Dialog><DialogTrigger render={<Button type="button" variant="outline" size="sm" className="version-edit-button" />}><Settings2 />編輯</DialogTrigger><DialogContent className="version-edit-dialog"><DialogHeader><DialogTitle>編輯系統與版本</DialogTitle><DialogDescription>這些名稱與說明會同步顯示在地圖及匯出文件。</DialogDescription></DialogHeader><div className="version-form">
